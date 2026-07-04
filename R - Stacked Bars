@@ -1,7 +1,7 @@
 # ==============================================================================
 # STACKED BAR CHARTS FOR OTU GUILD ANALYSIS
 # ==============================================================================
-# This script creates eight stacked bar charts:
+# This script creates fourteen stacked bar charts:
 # GUILD ANALYSIS:
 # 1. Abundance-based: Shows relative abundance of each guild per sample
 # 2. Richness-based: Shows number of OTUs from each guild per sample
@@ -27,7 +27,7 @@ library(reshape2)    # For data reshaping
 
 # Read the OTU table from BIOM format
 # BIOM files are a standard format for biological observation matrices
-otu_biom <- read_biom("~/Downloads/FenData/R_Studio/FENS.ITS.StkBr.wG.wPhy_20260505/data/OTU.biom")
+otu_biom <- read_biom("~/Downloads/FenData/R Studio/FENS.ITS.StkBr.wG.wPhy_20260210/data/OTU.biom")
 
 # Extract the OTU table as a matrix (OTUs as rows, samples as columns)
 otu_table <- as.matrix(biom_data(otu_biom))
@@ -37,10 +37,10 @@ otu_df <- as.data.frame(otu_table)
 otu_df$OTU_ID <- rownames(otu_df)
 
 # Read guild metadata (links each OTU to its functional guild)
-guild_metadata <- read.csv("~/Downloads/FenData/R_Studio/FENS.ITS.StkBr.wG.wPhy_20260505/data/guild_metadata.csv", stringsAsFactors = FALSE)
+guild_metadata <- read.csv("~/Downloads/FenData/R Studio/FENS.ITS.StkBr.wG.wPhy_20260210/data/guild_metadata.csv", stringsAsFactors = FALSE)
 
 # Read sample metadata (contains Field.ID labels for samples)
-sample_metadata <- read.csv("~/Downloads/FenData/R_Studio/FENS.ITS.StkBr.wG.wPhy_20260505/data/sample_metadata.csv", stringsAsFactors = FALSE)
+sample_metadata <- read.csv("~/Downloads/FenData/R Studio/FENS.ITS.StkBr.wG.wPhy_20260210/data/sample_metadata.csv", stringsAsFactors = FALSE)
 
 # extract OTU taxonomy from BIOM file
 tax_data <- observation_metadata(otu_biom)
@@ -54,10 +54,10 @@ phylum_df <- data.frame(
 phylum_df$Phylum <- gsub("p__", "", as.character(phylum_df$Phylum))
 
 # filter for fungi
-phylum_df <- phylum_df %>%
+phylum_df <- phylum_df %>% 
   filter(grepl("Ascomycota|Basidiomycota|Chytridiomycota|
-                Mucuromycota|Rozellomycota|Monoblepharomycota|
-                Olpidiomycota|Entorrhizomycota|
+                Mucuromycota|Rozellomycota|Monoblepharomycota|Cercozoa|
+                Olpidiomycota|Entorrhizomycota|Katablepharidophyta|
                 Basidiobolomycota|Glomeromycota|Mortierellomycota|
                 Fungi_phy_Incertae_sedis|Blastocladiomycota|
                 Aphelidiomycota|Zoopagomycota|Kickxellomycota", Phylum)
@@ -72,6 +72,15 @@ guild_metadata$Guild <- trimws(guild_metadata$Guild)
 
 # Verify unique guild values
 print(unique(guild_metadata$Guild))
+
+# Verify that all guild values are valid
+valid_guilds <- c("Endophyte", "Saprotroph", "Saprotroph-Symbiotroph", 
+                  "Pathogen-Saprotroph", "Pathogen", "Endomycorrhizal", 
+                  "Ectomycorrhizal", "Epiphyte-Saprotroph", "Lichenized", "Other")
+
+if (!all(guild_metadata$Guild %in% valid_guilds)) {
+  warning("Some guild values do not match expected categories!")
+}
 
 # ------------------------------------------------------------------------------
 # MERGE OTU DATA WITH GUILD INFORMATION
@@ -163,6 +172,17 @@ occurrence_summary <- occurrence_summary %>%
   left_join(sample_metadata %>% select(SampleID, `Field.ID`), 
             by = "SampleID")
 
+abundance_summary_no_other <- abundance_summary_no_other %>%
+  left_join(sample_metadata %>% select(SampleID, `Field.ID`), 
+            by = "SampleID")
+
+otu_richness_no_other <- otu_richness_no_other %>%
+  left_join(sample_metadata %>% select(SampleID, `Field.ID`), 
+            by = "SampleID")
+
+occurrence_summary_no_other <- occurrence_summary_no_other %>%
+  left_join(sample_metadata %>% select(SampleID, `Field.ID`), 
+            by = "SampleID")
 
 # Use Field.ID if available, otherwise use SampleID
 abundance_summary <- abundance_summary %>%
@@ -172,6 +192,15 @@ otu_richness <- otu_richness %>%
   mutate(Label = ifelse(!is.na(`Field.ID`), `Field.ID`, SampleID))
 
 occurrence_summary <- occurrence_summary %>%
+  mutate(Label = ifelse(!is.na(`Field.ID`), `Field.ID`, SampleID))
+
+abundance_summary_no_other <- abundance_summary_no_other %>%
+  mutate(Label = ifelse(!is.na(`Field.ID`), `Field.ID`, SampleID))
+
+otu_richness_no_other <- otu_richness_no_other %>%
+  mutate(Label = ifelse(!is.na(`Field.ID`), `Field.ID`, SampleID))
+
+occurrence_summary_no_other <- occurrence_summary_no_other %>%
   mutate(Label = ifelse(!is.na(`Field.ID`), `Field.ID`, SampleID))
 
 # ------------------------------------------------------------------------------
@@ -229,14 +258,11 @@ guild_colors <- c(
   "Saprotroph" = "#ff7f0e",             # Orange
   "Saprotroph-Symbiotroph" = "#2ca02c", # Green
   "Pathogen-Saprotroph" = "#d62728",    # Red
-  "Pathogen" = "#F0E442",               # Yellow
+  "Pathogen" = "#9467bd",               # Purple
+  "Endomycorrhizal" = "#8c564b",        # Brown
   "Ectomycorrhizal" = "#e377c2",        # Pink
   "Lichenized" = "#bcbd22",             # Yellow-green
-  "Arbuscular" = "#8c564b",             # Brown      
-  "Orchid Mycorrhizal" = "#B23AEE",     # darkorchid
-  "Ericoid Mycorrhizal" = "#FFF8DC",    # cornsilk
-  "Chytrid" = "#56B4E9",                # Light Blue
-  "Unassigned" = "#7f7f7f"              # Gray
+  "Other" = "#7f7f7f"                   # Gray
 )
 
 # Create a color palette for phyla (will be generated dynamically based on phyla present)
@@ -379,6 +405,128 @@ total_abundance_plot <- ggplot(abundance_summary,
 print(total_abundance_plot)
 ggsave("OTU_Guild_Total_Abundance_StackedBar.png", 
        plot = total_abundance_plot, width = 12, height = 7, dpi = 300)
+
+# ------------------------------------------------------------------------------
+# CREATE ABUNDANCE-BASED STACKED BAR CHART (EXCLUDING "OTHER")
+# ------------------------------------------------------------------------------
+
+abundance_plot_no_other <- ggplot(abundance_summary_no_other, 
+                                  aes(x = Label, y = Relative_Abundance, fill = Guild)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = guild_colors) +
+  labs(title = "Relative Abundance of Fungal Guilds by Sample (Excluding 'Other')",
+       x = "Sample (Field.ID)",
+       y = "Relative Abundance (%)",
+       fill = "Functional Guild") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(abundance_plot_no_other)
+ggsave("OTU_Guild_Abundance_StackedBar_No_Other.png", 
+       plot = abundance_plot_no_other, width = 12, height = 7, dpi = 300)
+
+# ------------------------------------------------------------------------------
+# CREATE RICHNESS-BASED STACKED BAR CHART (EXCLUDING "OTHER")
+# ------------------------------------------------------------------------------
+
+richness_plot_no_other <- ggplot(otu_richness_no_other, 
+                                 aes(x = Label, y = OTU_Richness, fill = Guild)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = guild_colors) +
+  labs(title = "OTU Richness by Fungal Guild and Sample (Excluding 'Other')",
+       subtitle = "Total number of unique OTUs per guild",
+       x = "Sample (Field.ID)",
+       y = "Number of OTUs (Richness)",
+       fill = "Functional Guild") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(richness_plot_no_other)
+ggsave("OTU_Guild_Richness_StackedBar_No_Other.png", 
+       plot = richness_plot_no_other, width = 12, height = 7, dpi = 300)
+
+# ------------------------------------------------------------------------------
+# CREATE OCCURRENCE-BASED STACKED BAR CHART (EXCLUDING "OTHER")
+# ------------------------------------------------------------------------------
+
+occurrence_plot_no_other <- ggplot(occurrence_summary_no_other, 
+                                   aes(x = Label, y = Relative_Occurrence, fill = Guild)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = guild_colors) +
+  labs(title = "Relative Occurrence of Fungal Guilds by Sample (Excluding 'Other')",
+       subtitle = "Based on proportion of OTUs present",
+       x = "Sample (Field.ID)",
+       y = "Relative Occurrence (%)",
+       fill = "Functional Guild") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(occurrence_plot_no_other)
+ggsave("OTU_Guild_Occurrence_StackedBar_No_Other.png", 
+       plot = occurrence_plot_no_other, width = 12, height = 7, dpi = 300)
+
+# ------------------------------------------------------------------------------
+# CREATE TOTAL ABUNDANCE STACKED BAR CHART - ABSOLUTE COUNTS (EXCLUDING "OTHER")
+# ------------------------------------------------------------------------------
+
+total_abundance_plot_no_other <- ggplot(abundance_summary_no_other, 
+                                        aes(x = Label, y = Total_Abundance, fill = Guild)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = guild_colors) +
+  labs(title = "Total Abundance of Fungal Guilds by Sample (Excluding 'Other')",
+       subtitle = "Total read counts per guild",
+       x = "Sample (Field.ID)",
+       y = "Total Abundance (Read Counts)",
+       fill = "Functional Guild") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(total_abundance_plot_no_other)
+ggsave("OTU_Guild_Total_Abundance_StackedBar_No_Other.png", 
+       plot = total_abundance_plot_no_other, width = 12, height = 7, dpi = 300)
 
 # ------------------------------------------------------------------------------
 # CREATE PHYLUM-BASED STACKED BAR CHARTS
@@ -784,10 +932,14 @@ write.csv(abundance_summary, "Guild_Abundance_Summary.csv", row.names = FALSE)
 write.csv(ss_summary_abundance, "Sum_of_Squares_Abundance_Summary.csv", row.names = FALSE)
 write.csv(guild_ss_abundance, "Guild_Specific_Variation_Abundance.csv", row.names = FALSE)
 write.csv(otu_richness, "Guild_Richness_Summary.csv", row.names = FALSE)
+write.csv(occurrence_summary_no_other, "Guild_Occurrence_Summary_No_Other.csv", row.names = FALSE)
 write.csv(ss_summary_occurrence, "Sum_of_Squares_Occurrence_Summary.csv", row.names = FALSE)
 write.csv(guild_ss_occurrence, "Guild_Specific_Variation_Occurrence.csv", row.names = FALSE)
 write.csv(otu_richness, "Guild_Richness_Summary.csv", row.names = FALSE)
 write.csv(occurrence_summary, "Guild_Occurrence_Summary.csv", row.names = FALSE)
+write.csv(abundance_summary_no_other, "Guild_Abundance_Summary_No_Other.csv", row.names = FALSE)
+write.csv(otu_richness_no_other, "Guild_Richness_Summary_No_Other.csv", row.names = FALSE)
+write.csv(occurrence_summary_no_other, "Guild_Occurrence_Summary_No_Other.csv", row.names = FALSE)
 
 # ------------------------------------------------------------------------------
 # PRINT SUMMARY INFORMATION
@@ -808,6 +960,11 @@ cat("  - OTU_Guild_Richness_StackedBar.png\n")
 cat("  - OTU_Guild_Occurrence_StackedBar.png\n")
 cat("  - OTU_Guild_Occurrence_Absolute_StackedBar.png\n")
 cat("  - OTU_Guild_Total_Abundance_StackedBar.png\n")
+cat("  - OTU_Guild_Abundance_StackedBar_No_Other.png\n")
+cat("  - OTU_Guild_Richness_StackedBar_No_Other.png\n")
+cat("  - OTU_Guild_Occurrence_StackedBar_No_Other.png\n")
+cat("  - OTU_Guild_Occurrence_Absolute_StackedBar_No_Other.png\n")
+cat("  - OTU_Guild_Total_Abundance_StackedBar_No_Other.png\n")
 cat("  PHYLUM ANALYSIS:\n")
 cat("  - OTU_Phylum_Relative_Abundance_StackedBar.png\n")
 cat("  - OTU_Phylum_Total_Abundance_StackedBar.png\n")
@@ -822,6 +979,7 @@ cat("  - Guild_Occurrence_Summary.csv\n")
 cat("  - Sum_of_Squares_Occurrence_Summary.csv\n")
 cat("  - Guild_Specific_Variation_Occurrence.csv\n")
 cat("  - Guild_Richness_Summary.csv\n")
+cat("  - Guild_Occurrence_Summary_No_Other.csv\n")
 cat("  PHYLUM ANALYSIS:\n")
 cat("  - Phylum_Abundance_Summary.csv\n")
 cat("  - Phylum_Occurrence_Summary.csv\n")
@@ -831,6 +989,9 @@ cat("  - Sum_of_Squares_Phylum_Occurrence_Summary.csv\n")
 cat("  - Phylum_Specific_Variation_Occurrence.csv\n")
 cat("  - Guild_Richness_Summary.csv\n")
 cat("  - Guild_Occurrence_Summary.csv\n")
+cat("  - Guild_Abundance_Summary_No_Other.csv\n")
+cat("  - Guild_Richness_Summary_No_Other.csv\n")
+cat("  - Guild_Occurrence_Summary_No_Other.csv\n")
 
 # ==============================================================================
 # END OF SCRIPT
