@@ -1,0 +1,1327 @@
+# ==============================================================================
+# 1. LOAD REQUIRED LIBRARIES
+# ==============================================================================
+
+# Install packages if needed (uncomment to install)
+# install.packages(c("biomformat", "phyloseq", "vegan", "ggplot2", "dplyr", 
+#                    "tidyr", "VennDiagram", "ape", "ggtree", "gridExtra"))
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install(c("phyloseq", "ggtree"))
+
+library(biomformat)      # For reading BIOM files
+library(phyloseq)        # For microbiome data analysis
+library(vegan)           # For diversity calculations
+library(ggplot2)         # For plotting
+library(dplyr)           # For data manipulation
+library(tidyr)           # For data reshaping
+library(VennDiagram)     # For Venn diagrams
+library(ape)             # For phylogenetic tree manipulation
+library(ggtree)          # For phylogenetic tree visualization
+library(gridExtra)       # For arranging multiple plots
+
+# ==============================================================================
+# 2. SET WORKING DIRECTORY AND FILE PATHS
+# ==============================================================================
+
+# Set your working directory where the files are located
+# setwd("path/to/your/data")
+
+# TROUBLESHOOTING: Check current directory and available files
+cat("Current working directory:", getwd(), "\n")
+cat("\nFiles in current directory:\n")
+print(list.files())
+
+# Define file paths
+biom_file <- "data/OTU.biom"
+taxonomy_file <- "data/taxonomy.txt"
+phylo_file <- "data/OTUphylo.nwk"
+
+# Check if files exist
+cat("\n--- Checking for required files ---\n")
+cat("OTU.biom exists:", file.exists(biom_file), "\n")
+cat("taxonomy.txt exists:", file.exists(taxonomy_file), "\n")
+cat("OTUphylo.nwk exists:", file.exists(phylo_file), "\n")
+
+# ==============================================================================
+# 3. IMPORT DATA FILES
+# ==============================================================================
+
+cat("Loading data files...\n")
+
+# 3.1 Import BIOM file (contains OTU table and potentially metadata)
+# LotuS2 can output different formats, so we'll try multiple approaches
+
+# OPTION A: Try reading BIOM file
+tryCatch({
+  cat("Attempting to read BIOM file...\n")
+  biom_data <- read_biom(biom_file)
+  otu_table_data <- as(biom_data(biom_data), "matrix")
+  cat("BIOM file loaded successfully!\n")
+  biom_success <- TRUE
+}, error = function(e) {
+  cat("BIOM file import failed. Error:\n")
+  print(e)
+  cat("\nTrying alternative import methods...\n")
+  biom_success <<- FALSE
+})
+
+# Check dimensions to determine orientation
+cat("OTU table dimensions:", dim(otu_table_data), "\n")
+cat("  Rows:", nrow(otu_table_data), "\n")
+cat("  Columns:", ncol(otu_table_data), "\n")
+
+# 3.2 Import taxonomy file
+# Assuming taxonomy.txt is tab-delimited with OTU_ID and taxonomy columns
+taxonomy_data <- read.table(taxonomy_file, 
+                            header = TRUE, 
+                            sep = "\t", 
+                            comment.char = "",
+                            quote = "",
+                            stringsAsFactors = FALSE)
+
+# 3.3 Import phylogenetic tree
+phylo_tree <- read.tree(phylo_file)
+
+# 3.4 Import sample metadata from external file
+# User has provided metadata file with columns: SampleID, Peat, Vaccinium, Field ID
+cat("\n--- Loading Sample Metadata ---\n")
+
+metadata_files <- c("data/sample_metada.csv")
+
+metadata_found <- FALSE
+for (mfile in metadata_files) {
+  if (file.exists(mfile)) {
+    cat(paste0("Found metadata file: ", mfile, "\n"))
+    
+    # Determine separator based on file extension
+    if (grepl(".csv$", mfile)) {
+      sample_metadata <- read.table(mfile,
+                                    header = TRUE,
+                                    sep = ",",
+                                    stringsAsFactors = FALSE,
+                                    check.names = FALSE)
+    } else {
+      sample_metadata <- read.table(mfile,
+                                    header = TRUE,
+                                    sep = "\t",
+                                    stringsAsFactors = FALSE,
+                                    check.names = FALSE)
+    }
+    
+    cat("Metadata loaded successfully!\n")
+    cat("Columns found:", paste(colnames(sample_metadata), collapse = ", "), "\n")
+    cat("Number of samples:", nrow(sample_metadata), "\n")
+    metadata_found <- TRUE
+    break
+  }
+}
+
+if (!metadata_found) {
+  stop("ERROR: Could not find metadata file. Please ensure one of these exists:\n",
+       paste(metadata_files, collapse = ", "))
+}
+
+# Verify required columns exist
+required_cols <- c("SampleID", "Peat", "Vaccinium")
+missing_cols <- required_cols[!required_cols %in% colnames(sample_metadata)]
+if (length(missing_cols) > 0) {
+  stop("ERROR: Missing required columns in metadata: ", 
+       paste(missing_cols, collapse = ", "))
+}
+
+# Check for Field ID column (case-insensitive)
+field_id_col <- colnames(sample_metadata)[grepl("field.*id", colnames(sample_metadata), 
+                                                ignore.case = TRUE)]
+if (length(field_id_col) > 0) {
+  cat("Field ID column found:", field_id_col[1], "\n")
+  # Standardize column name
+  colnames(sample_metadata)[colnames(sample_metadata) == field_id_col[1]] <- "FieldID"
+} else {
+  cat("Warning: No 'Field ID' column found. Using SampleID for labels.\n")
+  sample_metadata$FieldID <- sample_metadata$SampleID
+}
+
+# Display metadata summary
+cat("\nMetadata Summary:\n")
+print(head(sample_metadata))
+cat("\nPeat distribution:\n")
+print(table(sample_metadata$Peat))
+cat("\nVaccinium distribution:\n")
+print(table(sample_metadata$Vaccinium))
+cat("\n")
+
+# Ensure SampleID matches OTU table sample names
+otu_samples <- colnames(otu_table_data)
+metadata_samples <- sample_metadata$SampleID
+
+# Check for mismatches
+if (!all(otu_samples %in% metadata_samples)) {
+  cat("WARNING: Some OTU table samples not found in metadata:\n")
+  missing <- otu_samples[!otu_samples %in% metadata_samples]
+  cat(paste(missing, collapse = ", "), "\n")
+}
+
+if (!all(metadata_samples %in% otu_samples)) {
+  cat("WARNING: Some metadata samples not found in OTU table:\n")
+  missing <- metadata_samples[!metadata_samples %in% otu_samples]
+  cat(paste(missing, collapse = ", "), "\n")
+}
+
+# Keep only samples present in both OTU table and metadata
+common_samples <- intersect(otu_samples, metadata_samples)
+cat(paste0("\nProceeding with ", length(common_samples), 
+           " samples present in both OTU table and metadata\n"))
+
+# Filter OTU table to matching samples
+otu_table_data <- otu_table_data[, common_samples]
+
+# Filter and order metadata to match OTU table
+sample_metadata <- sample_metadata[match(common_samples, sample_metadata$SampleID), ]
+
+# Convert logical to factor for analysis
+sample_metadata$Peat <- as.factor(sample_metadata$Peat)
+sample_metadata$Vaccinium <- as.factor(sample_metadata$Vaccinium)
+
+# ==============================================================================
+# 4. CREATE PHYLOSEQ OBJECT
+# ==============================================================================
+
+cat("Creating phyloseq object...\n")
+
+# 4.1 Prepare OTU table for phyloseq
+# Phyloseq expects OTUs as rows, samples as columns
+if (nrow(otu_table_data) < ncol(otu_table_data)) {
+  otu_table_data <- t(otu_table_data)
+}
+
+OTU <- otu_table(otu_table_data, taxa_are_rows = TRUE)
+
+# 4.2 Prepare taxonomy table
+# Parse taxonomy string into separate columns if needed
+if (ncol(taxonomy_data) == 2) {
+  # Assuming format: OTU_ID, taxonomy_string
+  # Split taxonomy string (commonly separated by semicolons)
+  tax_split <- strsplit(taxonomy_data[, 2], ";")
+  
+  # Determine maximum number of taxonomic levels
+  max_levels <- max(sapply(tax_split, length))
+  
+  # Create matrix with taxonomic levels
+  tax_matrix <- matrix(NA, nrow = nrow(taxonomy_data), ncol = max_levels)
+  for (i in seq_along(tax_split)) {
+    tax_matrix[i, 1:length(tax_split[[i]])] <- tax_split[[i]]
+  }
+  
+  # Set column names (common taxonomic ranks for fungi)
+  colnames(tax_matrix) <- c("Kingdom", "Phylum", "Class", "Order", 
+                            "Family", "Genus", "Species")[1:max_levels]
+  rownames(tax_matrix) <- taxonomy_data[, 1]
+  
+  TAX <- tax_table(tax_matrix)
+} else {
+  # Taxonomy already in matrix format
+  tax_matrix <- as.matrix(taxonomy_data[, -1])
+  rownames(tax_matrix) <- taxonomy_data[, 1]
+  TAX <- tax_table(tax_matrix)
+}
+
+# 4.3 Prepare sample metadata
+rownames(sample_metadata) <- sample_metadata$SampleID
+SAMP <- sample_data(sample_metadata)
+
+# 4.4 Prepare phylogenetic tree
+TREE <- phy_tree(phylo_tree)
+
+# 4.5 Combine into phyloseq object
+physeq <- phyloseq(OTU, TAX, SAMP, TREE)
+
+cat("Phyloseq object created successfully!\n")
+print(physeq)
+
+# ==============================================================================
+# 5. DATA PREPROCESSING
+# ==============================================================================
+
+cat("\nPreprocessing data...\n")
+
+# 5.1 Remove low-abundance OTUs (optional but recommended)
+# Remove OTUs with less than 10 total reads across all samples
+physeq_filtered <- prune_taxa(taxa_sums(physeq) >= 10, physeq)
+
+cat("OTUs before filtering:", ntaxa(physeq), "\n")
+cat("OTUs after filtering:", ntaxa(physeq_filtered), "\n")
+
+# Use filtered data for downstream analysis
+physeq <- physeq_filtered
+
+# 5.2 Create presence/absence (occurrence) version
+# Convert counts to presence/absence (0/1)
+physeq_pa <- transform_sample_counts(physeq, function(x) ifelse(x > 0, 1, 0))
+
+# ==============================================================================
+# 6. SUBSET DATA BY METADATA CATEGORIES
+# ==============================================================================
+
+cat("\nSubsetting data by Peat and Vaccinium categories...\n")
+
+# Create subsets for each condition
+physeq_peat_true <- subset_samples(physeq, Peat == "TRUE")
+physeq_peat_false <- subset_samples(physeq, Peat == "FALSE")
+physeq_vacc_true <- subset_samples(physeq, Vaccinium == "TRUE")
+physeq_vacc_false <- subset_samples(physeq, Vaccinium == "FALSE")
+
+# Presence/absence versions
+physeq_pa_peat_true <- subset_samples(physeq_pa, Peat == "TRUE")
+physeq_pa_peat_false <- subset_samples(physeq_pa, Peat == "FALSE")
+physeq_pa_vacc_true <- subset_samples(physeq_pa, Vaccinium == "TRUE")
+physeq_pa_vacc_false <- subset_samples(physeq_pa, Vaccinium == "FALSE")
+
+cat("Samples in Peat=TRUE:", nsamples(physeq_peat_true), "\n")
+cat("Samples in Peat=FALSE:", nsamples(physeq_peat_false), "\n")
+cat("Samples in Vaccinium=TRUE:", nsamples(physeq_vacc_true), "\n")
+cat("Samples in Vaccinium=FALSE:", nsamples(physeq_vacc_false), "\n")
+
+# ==============================================================================
+# 7. ALPHA DIVERSITY ANALYSIS
+# ==============================================================================
+
+cat("\n========================================\n")
+cat("ALPHA DIVERSITY ANALYSIS\n")
+cat("========================================\n")
+
+# 7.1 Species Accumulation Curves
+cat("\n--- Species Accumulation Curves ---\n")
+
+# Prepare OTU table in correct format for vegan (samples as rows, OTUs as columns)
+cat("Preparing OTU matrix for accumulation curves...\n")
+otu_matrix_t <- as.matrix(t(otu_table(physeq)))
+
+# Verify dimensions
+cat("Transposed OTU matrix dimensions: ", dim(otu_matrix_t), "\n")
+cat("  Rows (samples):", nrow(otu_matrix_t), "\n")
+cat("  Columns (OTUs):", ncol(otu_matrix_t), "\n")
+
+  # 7.1.1 Overall species accumulation curve
+  cat("Calculating overall species accumulation curve...\n")
+  
+  tryCatch({
+    specaccum_overall <- specaccum(otu_matrix_t, method = "exact")
+    
+    # Plot overall accumulation curve
+    png("species_accumulation_overall.png", width = 10, height = 8, units = "in", res = 300)
+    plot(specaccum_overall, 
+         ci.type = "poly", 
+         col = "blue", 
+         lwd = 2, 
+         ci.lty = 0, 
+         ci.col = alpha("lightblue", 0.5),
+         xlab = "Number of Samples", 
+         ylab = "Number of OTUs",
+         main = "Species Accumulation Curve - All Samples",
+         cex.main = 1.5,
+         cex.lab = 1.2)
+    grid()
+    dev.off()
+    
+    cat("Overall curve: Observed OTUs =", max(specaccum_overall$richness), "\n")
+    cat("Expected at", specaccum_overall$sites[length(specaccum_overall$sites)], 
+        "samples:", round(specaccum_overall$richness[length(specaccum_overall$richness)]), "\n")
+    
+  }, error = function(e) {
+    cat("ERROR creating overall accumulation curve:\n")
+    print(e)
+    cat("This may be due to insufficient data or matrix format issues.\n")
+    specaccum_overall <<- NULL
+  })
+  
+  # 7.1.2 Species accumulation by Peat
+  cat("\nCalculating species accumulation curves by Peat...\n")
+  
+  # Split samples by Peat
+  samples_peat_true <- sample_metadata$SampleID[sample_metadata$Peat == "TRUE"]
+  samples_peat_false <- sample_metadata$SampleID[sample_metadata$Peat == "FALSE"]
+  
+  cat("Samples with Peat=TRUE:", length(samples_peat_true), "\n")
+  cat("Samples with Peat=FALSE:", length(samples_peat_false), "\n")
+  
+  # Only proceed if we have samples in each category
+  if (length(samples_peat_true) >= 2 && length(samples_peat_false) >= 2) {
+    
+    tryCatch({
+      # Subset OTU matrix
+      otu_peat_true <- otu_matrix_t[rownames(otu_matrix_t) %in% samples_peat_true, ]
+      otu_peat_false <- otu_matrix_t[rownames(otu_matrix_t) %in% samples_peat_false, ]
+      
+      # Remove OTUs not present in these samples
+      otu_peat_true <- otu_peat_true[, colSums(otu_peat_true) > 0]
+      otu_peat_false <- otu_peat_false[, colSums(otu_peat_false) > 0]
+      
+      # Calculate accumulation curves
+      specaccum_peat_true <- specaccum(otu_peat_true, method = "exact")
+      specaccum_peat_false <- specaccum(otu_peat_false, method = "exact")
+      
+      # Plot Peat comparison
+      png("species_accumulation_Peat.png", width = 12, height = 8, units = "in", res = 300)
+      plot(specaccum_peat_true, 
+           ci.type = "poly", 
+           col = "#E41A1C", 
+           lwd = 2, 
+           ci.lty = 0, 
+           ci.col = alpha("#E41A1C", 0.3),
+           xlab = "Number of Samples", 
+           ylab = "Number of OTUs",
+           main = "Species Accumulation Curves by Peat",
+           cex.main = 1.5,
+           cex.lab = 1.2,
+           ylim = c(0, max(c(specaccum_peat_true$richness, specaccum_peat_false$richness)) * 1.1))
+      plot(specaccum_peat_false, 
+           ci.type = "poly", 
+           col = "#377EB8", 
+           lwd = 2, 
+           ci.lty = 0, 
+           ci.col = alpha("#377EB8", 0.3),
+           add = TRUE)
+      legend("bottomright", 
+             legend = c("Peat = TRUE", "Peat = FALSE"), 
+             col = c("#E41A1C", "#377EB8"), 
+             lwd = 2, 
+             bty = "n",
+             cex = 1.2)
+      grid()
+      dev.off()
+      
+      cat("Peat=TRUE: Observed OTUs =", max(specaccum_peat_true$richness), "\n")
+      cat("Peat=FALSE: Observed OTUs =", max(specaccum_peat_false$richness), "\n")
+      
+    }, error = function(e) {
+      cat("ERROR creating Peat accumulation curves:\n")
+      print(e)
+      specaccum_peat_true <<- NULL
+      specaccum_peat_false <<- NULL
+    })
+    
+  } else {
+    cat("Insufficient samples for Peat comparison (need at least 2 per category)\n")
+    specaccum_peat_true <- NULL
+    specaccum_peat_false <- NULL
+  }
+  
+  # 7.1.3 Species accumulation by Vaccinium
+  cat("\nCalculating species accumulation curves by Vaccinium...\n")
+  
+  samples_vacc_true <- sample_metadata$SampleID[sample_metadata$Vaccinium == "TRUE"]
+  samples_vacc_false <- sample_metadata$SampleID[sample_metadata$Vaccinium == "FALSE"]
+  
+  cat("Samples with Vaccinium=TRUE:", length(samples_vacc_true), "\n")
+  cat("Samples with Vaccinium=FALSE:", length(samples_vacc_false), "\n")
+  
+  if (length(samples_vacc_true) >= 2 && length(samples_vacc_false) >= 2) {
+    
+    tryCatch({
+      otu_vacc_true <- otu_matrix_t[rownames(otu_matrix_t) %in% samples_vacc_true, ]
+      otu_vacc_false <- otu_matrix_t[rownames(otu_matrix_t) %in% samples_vacc_false, ]
+      
+      # Remove OTUs not present in these samples
+      otu_vacc_true <- otu_vacc_true[, colSums(otu_vacc_true) > 0]
+      otu_vacc_false <- otu_vacc_false[, colSums(otu_vacc_false) > 0]
+      
+      specaccum_vacc_true <- specaccum(otu_vacc_true, method = "exact")
+      specaccum_vacc_false <- specaccum(otu_vacc_false, method = "exact")
+      
+      # Plot Vaccinium comparison
+      png("species_accumulation_Vaccinium.png", width = 12, height = 8, units = "in", res = 300)
+      plot(specaccum_vacc_true, 
+           ci.type = "poly", 
+           col = "#4DAF4A", 
+           lwd = 2, 
+           ci.lty = 0, 
+           ci.col = alpha("#4DAF4A", 0.3),
+           xlab = "Number of Samples", 
+           ylab = "Number of OTUs",
+           main = "Species Accumulation Curves by Vaccinium",
+           cex.main = 1.5,
+           cex.lab = 1.2,
+           ylim = c(0, max(c(specaccum_vacc_true$richness, specaccum_vacc_false$richness)) * 1.1))
+      plot(specaccum_vacc_false, 
+           ci.type = "poly", 
+           col = "#984EA3", 
+           lwd = 2, 
+           ci.lty = 0, 
+           ci.col = alpha("#984EA3", 0.3),
+           add = TRUE)
+      legend("bottomright", 
+             legend = c("Vaccinium = TRUE", "Vaccinium = FALSE"), 
+             col = c("#4DAF4A", "#984EA3"), 
+             lwd = 2, 
+             bty = "n",
+             cex = 1.2)
+      grid()
+      dev.off()
+      
+      cat("Vaccinium=TRUE: Observed OTUs =", max(specaccum_vacc_true$richness), "\n")
+      cat("Vaccinium=FALSE: Observed OTUs =", max(specaccum_vacc_false$richness), "\n")
+      
+    }, error = function(e) {
+      cat("ERROR creating Vaccinium accumulation curves:\n")
+      print(e)
+      specaccum_vacc_true <<- NULL
+      specaccum_vacc_false <<- NULL
+    })
+    
+  } else {
+    cat("Insufficient samples for Vaccinium comparison (need at least 2 per category)\n")
+    specaccum_vacc_true <- NULL
+    specaccum_vacc_false <- NULL
+  }
+  
+  # 7.1.4 Species accumulation for all four combinations
+  cat("\nCalculating species accumulation for all four category combinations...\n")
+  
+  samples_PT_VT <- sample_metadata$SampleID[sample_metadata$Peat == "TRUE" & 
+                                              sample_metadata$Vaccinium == "TRUE"]
+  samples_PT_VF <- sample_metadata$SampleID[sample_metadata$Peat == "TRUE" & 
+                                              sample_metadata$Vaccinium == "FALSE"]
+  samples_PF_VT <- sample_metadata$SampleID[sample_metadata$Peat == "FALSE" & 
+                                              sample_metadata$Vaccinium == "TRUE"]
+  samples_PF_VF <- sample_metadata$SampleID[sample_metadata$Peat == "FALSE" & 
+                                              sample_metadata$Vaccinium == "FALSE"]
+  
+  # Calculate accumulation curves (only if samples exist in each category)
+  if (length(samples_PT_VT) > 0) {
+    specaccum_PT_VT <- specaccum(otu_matrix_t[samples_PT_VT, ], method = "exact")
+  } else {
+    specaccum_PT_VT <- NULL
+  }
+  
+  if (length(samples_PT_VF) > 0) {
+    specaccum_PT_VF <- specaccum(otu_matrix_t[samples_PT_VF, ], method = "exact")
+  } else {
+    specaccum_PT_VF <- NULL
+  }
+  
+  if (length(samples_PF_VT) > 0) {
+    specaccum_PF_VT <- specaccum(otu_matrix_t[samples_PF_VT, ], method = "exact")
+  } else {
+    specaccum_PF_VT <- NULL
+  }
+  
+  if (length(samples_PF_VF) > 0) {
+    specaccum_PF_VF <- specaccum(otu_matrix_t[samples_PF_VF, ], method = "exact")
+  } else {
+    specaccum_PF_VF <- NULL
+  }
+  
+  # Plot all four combinations
+  png("species_accumulation_fourway.png", width = 14, height = 10, units = "in", res = 300)
+  par(mar = c(5, 5, 4, 2))
+  
+  # Determine y-axis limits
+  all_max <- max(c(
+    if (!is.null(specaccum_PT_VT)) max(specaccum_PT_VT$richness) else 0,
+    if (!is.null(specaccum_PT_VF)) max(specaccum_PT_VF$richness) else 0,
+    if (!is.null(specaccum_PF_VT)) max(specaccum_PF_VT$richness) else 0,
+    if (!is.null(specaccum_PF_VF)) max(specaccum_PF_VF$richness) else 0
+  ))
+  
+  # Initialize plot
+  plot(1, type = "n", 
+       xlim = c(0, max(c(length(samples_PT_VT), length(samples_PT_VF), 
+                         length(samples_PF_VT), length(samples_PF_VF)))),
+       ylim = c(0, all_max * 1.1),
+       xlab = "Number of Samples", 
+       ylab = "Number of OTUs",
+       main = "Species Accumulation Curves - All Category Combinations",
+       cex.main = 1.5,
+       cex.lab = 1.2)
+  grid()
+  
+  # Add curves
+  colors <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3")
+  labels <- c("Peat=T, Vacc=T", "Peat=T, Vacc=F", "Peat=F, Vacc=T", "Peat=F, Vacc=F")
+  active_curves <- c(!is.null(specaccum_PT_VT), !is.null(specaccum_PT_VF),
+                     !is.null(specaccum_PF_VT), !is.null(specaccum_PF_VF))
+  
+  if (!is.null(specaccum_PT_VT)) {
+    plot(specaccum_PT_VT, ci.type = "poly", col = colors[1], lwd = 2, 
+         ci.lty = 0, ci.col = alpha(colors[1], 0.3), add = TRUE)
+  }
+  if (!is.null(specaccum_PT_VF)) {
+    plot(specaccum_PT_VF, ci.type = "poly", col = colors[2], lwd = 2, 
+         ci.lty = 0, ci.col = alpha(colors[2], 0.3), add = TRUE)
+  }
+  if (!is.null(specaccum_PF_VT)) {
+    plot(specaccum_PF_VT, ci.type = "poly", col = colors[3], lwd = 2, 
+         ci.lty = 0, ci.col = alpha(colors[3], 0.3), add = TRUE)
+  }
+  if (!is.null(specaccum_PF_VF)) {
+    plot(specaccum_PF_VF, ci.type = "poly", col = colors[4], lwd = 2, 
+         ci.lty = 0, ci.col = alpha(colors[4], 0.3), add = TRUE)
+  }
+  
+  legend("bottomright", 
+         legend = labels[active_curves], 
+         col = colors[active_curves], 
+         lwd = 2, 
+         bty = "n",
+         cex = 1.1)
+  dev.off()
+  
+  # Print summary statistics
+  cat("\nFour-way accumulation summary:\n")
+  if (!is.null(specaccum_PT_VT)) {
+    cat("Peat=T, Vacc=T: ", length(samples_PT_VT), " samples, ", 
+        max(specaccum_PT_VT$richness), " OTUs\n", sep = "")
+  }
+  if (!is.null(specaccum_PT_VF)) {
+    cat("Peat=T, Vacc=F: ", length(samples_PT_VF), " samples, ", 
+        max(specaccum_PT_VF$richness), " OTUs\n", sep = "")
+  }
+  if (!is.null(specaccum_PF_VT)) {
+    cat("Peat=F, Vacc=T: ", length(samples_PF_VT), " samples, ", 
+        max(specaccum_PF_VT$richness), " OTUs\n", sep = "")
+  }
+  if (!is.null(specaccum_PF_VF)) {
+    cat("Peat=F, Vacc=F: ", length(samples_PF_VF), " samples, ", 
+        max(specaccum_PF_VF$richness), " OTUs\n", sep = "")
+  }
+  
+  # 7.1.5 Rarefaction curves (alternative visualization) ##### ERRORRRR #####
+  cat("\nGenerating rarefaction curves...\n")
+  
+  # Rarefaction shows species richness as a function of sequencing depth
+  rarecurve_data <- rarecurve(otu_matrix_t, step = 100, label = FALSE)
+  
+  png("rarefaction_curves.png", width = 12, height = 8, units = "in", res = 300)
+  rarecurve(otu_matrix_t, 
+            step = 100, 
+            col = "blue", 
+            lwd = 1.5,
+            xlab = "Sample Size (Number of Sequences)", 
+            ylab = "Number of OTUs",
+            main = "Rarefaction Curves - All Samples",
+            cex.main = 1.5,
+            cex.lab = 1.2)
+  grid()
+  dev.off()
+  
+  # 7.1.6 Export accumulation data to CSV
+  cat("Exporting species accumulation data...\n")
+  
+  # Overall accumulation
+  accumulation_overall <- data.frame(
+    Samples = specaccum_overall$sites,
+    Richness = specaccum_overall$richness,
+    SD = specaccum_overall$sd
+  )
+  write.csv(accumulation_overall, "species_accumulation_overall.csv", row.names = FALSE)
+  
+  # By Peat
+  if (!is.null(specaccum_peat_true)) {
+    accumulation_peat_true <- data.frame(
+      Samples = specaccum_peat_true$sites,
+      Richness = specaccum_peat_true$richness,
+      SD = specaccum_peat_true$sd
+    )
+    write.csv(accumulation_peat_true, "species_accumulation_Peat_TRUE.csv", row.names = FALSE)
+  }
+  
+  if (!is.null(specaccum_peat_false)) {
+    accumulation_peat_false <- data.frame(
+      Samples = specaccum_peat_false$sites,
+      Richness = specaccum_peat_false$richness,
+      SD = specaccum_peat_false$sd
+    )
+    write.csv(accumulation_peat_false, "species_accumulation_Peat_FALSE.csv", row.names = FALSE)
+  }
+  
+  # By Vaccinium
+  if (!is.null(specaccum_vacc_true)) {
+    accumulation_vacc_true <- data.frame(
+      Samples = specaccum_vacc_true$sites,
+      Richness = specaccum_vacc_true$richness,
+      SD = specaccum_vacc_true$sd
+    )
+    write.csv(accumulation_vacc_true, "species_accumulation_Vaccinium_TRUE.csv", row.names = FALSE)
+  }
+  
+  if (!is.null(specaccum_vacc_false)) {
+    accumulation_vacc_false <- data.frame(
+      Samples = specaccum_vacc_false$sites,
+      Richness = specaccum_vacc_false$richness,
+      SD = specaccum_vacc_false$sd
+    )
+    write.csv(accumulation_vacc_false, "species_accumulation_Vaccinium_FALSE.csv", row.names = FALSE)
+  }
+  
+  cat("Species accumulation analysis complete!\n")
+  
+# 7.2 Calculate alpha diversity metrics for ABUNDANCE data
+alpha_div_abundance <- estimate_richness(physeq, 
+                                         measures = c("Observed", "Shannon", 
+                                                      "Simpson", "Chao1"))
+
+# Add metadata to alpha diversity results
+alpha_div_abundance$SampleID <- rownames(alpha_div_abundance)
+alpha_div_abundance <- merge(alpha_div_abundance, 
+                             sample_metadata, 
+                             by = "SampleID")
+
+# 7.3 Calculate alpha diversity for OCCURRENCE data
+alpha_div_occurrence <- estimate_richness(physeq_pa, 
+                                          measures = c("Observed", "Shannon", 
+                                                       "Simpson"))
+
+alpha_div_occurrence$SampleID <- rownames(alpha_div_occurrence)
+alpha_div_occurrence <- merge(alpha_div_occurrence, 
+                              sample_metadata, 
+                              by = "SampleID")
+
+# 7.4 Statistical comparisons
+cat("\n--- ABUNDANCE-based Alpha Diversity Comparisons ---\n")
+
+# Compare by Peat
+cat("\nShannon diversity by Peat:\n")
+peat_shannon_test <- wilcox.test(Shannon ~ Peat, 
+                                 data = alpha_div_abundance)
+print(peat_shannon_test)
+
+cat("\nObserved richness by Peat:\n")
+peat_rich_test <- wilcox.test(Observed ~ Peat, 
+                              data = alpha_div_abundance)
+print(peat_rich_test)
+
+# Compare by Vaccinium
+cat("\nShannon diversity by Vaccinium:\n")
+vacc_shannon_test <- wilcox.test(Shannon ~ Vaccinium, 
+                                 data = alpha_div_abundance)
+print(vacc_shannon_test)
+
+cat("\nObserved richness by Vaccinium:\n")
+vacc_rich_test <- wilcox.test(Observed ~ Vaccinium, 
+                              data = alpha_div_abundance)
+print(vacc_rich_test)
+
+# 7.5 Visualize alpha diversity - ABUNDANCE
+p1_abund <- ggplot(alpha_div_abundance, aes(x = Peat, y = Shannon, fill = Peat)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  geom_text(aes(label = FieldID), size = 2.5, hjust = -0.2, vjust = -0.2, 
+            position = position_jitter(width = 0.2)) +
+  theme_bw() +
+  labs(title = "Shannon Diversity by Peat (Abundance)",
+       y = "Shannon Index") +
+  theme(legend.position = "none")
+
+p2_abund <- ggplot(alpha_div_abundance, aes(x = Vaccinium, y = Shannon, fill = Vaccinium)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  geom_text(aes(label = FieldID), size = 2.5, hjust = -0.2, vjust = -0.2,
+            position = position_jitter(width = 0.2)) +
+  theme_bw() +
+  labs(title = "Shannon Diversity by Vaccinium (Abundance)",
+       y = "Shannon Index") +
+  theme(legend.position = "none")
+
+p3_abund <- ggplot(alpha_div_abundance, aes(x = Peat, y = Observed, fill = Peat)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  geom_text(aes(label = FieldID), size = 2.5, hjust = -0.2, vjust = -0.2,
+            position = position_jitter(width = 0.2)) +
+  theme_bw() +
+  labs(title = "Observed Richness by Peat (Abundance)",
+       y = "Number of OTUs") +
+  theme(legend.position = "none")
+
+p4_abund <- ggplot(alpha_div_abundance, aes(x = Vaccinium, y = Observed, fill = Vaccinium)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  geom_text(aes(label = FieldID), size = 2.5, hjust = -0.2, vjust = -0.2,
+            position = position_jitter(width = 0.2)) +
+  theme_bw() +
+  labs(title = "Observed Richness by Vaccinium (Abundance)",
+       y = "Number of OTUs") +
+  theme(legend.position = "none")
+
+# Save combined plot
+png("alpha_diversity_abundance.png", width = 12, height = 10, units = "in", res = 300)
+grid.arrange(p1_abund, p2_abund, p3_abund, p4_abund, ncol = 2)
+dev.off()
+
+# 7.6 Visualize alpha diversity - OCCURRENCE
+cat("\n--- OCCURRENCE-based Alpha Diversity Comparisons ---\n")
+
+p1_occur <- ggplot(alpha_div_occurrence, aes(x = Peat, y = Shannon, fill = Peat)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  geom_text(aes(label = FieldID), size = 2.5, hjust = -0.2, vjust = -0.2,
+            position = position_jitter(width = 0.2)) +
+  theme_bw() +
+  labs(title = "Shannon Diversity by Peat (Occurrence)",
+       y = "Shannon Index") +
+  theme(legend.position = "none")
+
+p2_occur <- ggplot(alpha_div_occurrence, aes(x = Vaccinium, y = Shannon, fill = Vaccinium)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  geom_text(aes(label = FieldID), size = 2.5, hjust = -0.2, vjust = -0.2,
+            position = position_jitter(width = 0.2)) +
+  theme_bw() +
+  labs(title = "Shannon Diversity by Vaccinium (Occurrence)",
+       y = "Shannon Index") +
+  theme(legend.position = "none")
+
+p3_occur <- ggplot(alpha_div_occurrence, aes(x = Peat, y = Observed, fill = Peat)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  geom_text(aes(label = FieldID), size = 2.5, hjust = -0.2, vjust = -0.2,
+            position = position_jitter(width = 0.2)) +
+  theme_bw() +
+  labs(title = "Observed Richness by Peat (Occurrence)",
+       y = "Number of OTUs") +
+  theme(legend.position = "none")
+
+p4_occur <- ggplot(alpha_div_occurrence, aes(x = Vaccinium, y = Observed, fill = Vaccinium)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  geom_text(aes(label = FieldID), size = 2.5, hjust = -0.2, vjust = -0.2,
+            position = position_jitter(width = 0.2)) +
+  theme_bw() +
+  labs(title = "Observed Richness by Vaccinium (Occurrence)",
+       y = "Number of OTUs") +
+  theme(legend.position = "none")
+
+png("alpha_diversity_occurrence.png", width = 12, height = 10, units = "in", res = 300)
+grid.arrange(p1_occur, p2_occur, p3_occur, p4_occur, ncol = 2)
+dev.off()
+
+# ==============================================================================
+# 8. BETA DIVERSITY ANALYSIS
+# ==============================================================================
+
+cat("\n========================================\n")
+cat("BETA DIVERSITY ANALYSIS\n")
+cat("========================================\n")
+
+# 8.1 Beta diversity - ABUNDANCE data
+cat("\n--- ABUNDANCE-based Beta Diversity ---\n")
+
+# Calculate Bray-Curtis dissimilarity
+bray_dist_abund <- phyloseq::distance(physeq, method = "bray")
+
+# Ordination using NMDS
+nmds_abund <- ordinate(physeq, method = "NMDS", distance = bray_dist_abund)
+
+# PERMANOVA tests for Peat and Vaccinium
+cat("\nPERMANOVA by Peat (Abundance):\n")
+permanova_peat_abund <- adonis2(bray_dist_abund ~ Peat, 
+                                data = as(sample_data(physeq), "data.frame"))
+print(permanova_peat_abund)
+
+cat("\nPERMANOVA by Vaccinium (Abundance):\n")
+permanova_vacc_abund <- adonis2(bray_dist_abund ~ Vaccinium, 
+                                data = as(sample_data(physeq), "data.frame"))
+print(permanova_vacc_abund)
+
+# Visualization
+p_nmds_peat_abund <- plot_ordination(physeq, nmds_abund, color = "Peat", label = "FieldID") +
+  geom_point(size = 4, alpha = 0.7) +
+  geom_text(aes(label = FieldID), size = 3, hjust = -0.3, vjust = 0.3) +
+  theme_bw() +
+  labs(title = "NMDS - Bray-Curtis (Abundance) by Peat") +
+  stat_ellipse(aes(group = Peat), linetype = 2) +
+  guides(label = "none")  # Hide duplicate legend
+
+p_nmds_vacc_abund <- plot_ordination(physeq, nmds_abund, color = "Vaccinium", label = "FieldID") +
+  geom_point(size = 4, alpha = 0.7) +
+  geom_text(aes(label = FieldID), size = 3, hjust = -0.3, vjust = 0.3) +
+  theme_bw() +
+  labs(title = "NMDS - Bray-Curtis (Abundance) by Vaccinium") +
+  stat_ellipse(aes(group = Vaccinium), linetype = 2) +
+  guides(label = "none")
+
+png("beta_diversity_abundance_nmds.png", width = 14, height = 6, units = "in", res = 300)
+grid.arrange(p_nmds_peat_abund, p_nmds_vacc_abund, ncol = 2)
+dev.off()
+
+# PCoA with weighted UniFrac (uses phylogenetic tree)
+unifrac_abund <- phyloseq::distance(physeq, method = "unifrac", weighted = TRUE)
+pcoa_abund <- ordinate(physeq, method = "PCoA", distance = unifrac_abund)
+
+p_pcoa_peat_abund <- plot_ordination(physeq, pcoa_abund, color = "Peat", label = "FieldID") +
+  geom_point(size = 4, alpha = 0.7) +
+  geom_text(aes(label = FieldID), size = 3, hjust = -0.3, vjust = 0.3) +
+  theme_bw() +
+  labs(title = "PCoA - Weighted UniFrac (Abundance) by Peat") +
+  stat_ellipse(aes(group = Peat), linetype = 2) +
+  guides(label = "none")
+
+p_pcoa_vacc_abund <- plot_ordination(physeq, pcoa_abund, color = "Vaccinium", label = "FieldID") +
+  geom_point(size = 4, alpha = 0.7) +
+  geom_text(aes(label = FieldID), size = 3, hjust = -0.3, vjust = 0.3) +
+  theme_bw() +
+  labs(title = "PCoA - Weighted UniFrac (Abundance) by Vaccinium") +
+  stat_ellipse(aes(group = Vaccinium), linetype = 2) +
+  guides(label = "none")
+
+png("beta_diversity_abundance_pcoa.png", width = 14, height = 6, units = "in", res = 300)
+grid.arrange(p_pcoa_peat_abund, p_pcoa_vacc_abund, ncol = 2)
+dev.off()
+
+# 8.2 Beta diversity - OCCURRENCE data
+cat("\n--- OCCURRENCE-based Beta Diversity ---\n")
+
+# Calculate Jaccard dissimilarity (appropriate for presence/absence)
+jaccard_dist_occur <- phyloseq::distance(physeq_pa, method = "jaccard")
+
+# Ordination using NMDS
+nmds_occur <- ordinate(physeq_pa, method = "NMDS", distance = jaccard_dist_occur)
+
+# PERMANOVA tests
+cat("\nPERMANOVA by Peat (Occurrence):\n")
+permanova_peat_occur <- adonis2(jaccard_dist_occur ~ Peat, 
+                                data = as(sample_data(physeq_pa), "data.frame"))
+print(permanova_peat_occur)
+
+cat("\nPERMANOVA by Vaccinium (Occurrence):\n")
+permanova_vacc_occur <- adonis2(jaccard_dist_occur ~ Vaccinium, 
+                                data = as(sample_data(physeq_pa), "data.frame"))
+print(permanova_vacc_occur)
+
+# Visualization
+p_nmds_peat_occur <- plot_ordination(physeq_pa, nmds_occur, color = "Peat", label = "FieldID") +
+  geom_point(size = 4, alpha = 0.7) +
+  geom_text(aes(label = FieldID), size = 3, hjust = -0.3, vjust = 0.3) +
+  theme_bw() +
+  labs(title = "NMDS - Jaccard (Occurrence) by Peat") +
+  stat_ellipse(aes(group = Peat), linetype = 2) +
+  guides(label = "none")
+
+p_nmds_vacc_occur <- plot_ordination(physeq_pa, nmds_occur, color = "Vaccinium", label = "FieldID") +
+  geom_point(size = 4, alpha = 0.7) +
+  geom_text(aes(label = FieldID), size = 3, hjust = -0.3, vjust = 0.3) +
+  theme_bw() +
+  labs(title = "NMDS - Jaccard (Occurrence) by Vaccinium") +
+  stat_ellipse(aes(group = Vaccinium), linetype = 2) +
+  guides(label = "none")
+
+png("beta_diversity_occurrence_nmds.png", width = 14, height = 6, units = "in", res = 300)
+grid.arrange(p_nmds_peat_occur, p_nmds_vacc_occur, ncol = 2)
+dev.off()
+
+# PCoA with unweighted UniFrac
+unifrac_occur <- phyloseq::distance(physeq_pa, method = "unifrac", weighted = FALSE)
+pcoa_occur <- ordinate(physeq_pa, method = "PCoA", distance = unifrac_occur)
+
+p_pcoa_peat_occur <- plot_ordination(physeq_pa, pcoa_occur, color = "Peat", label = "FieldID") +
+  geom_point(size = 4, alpha = 0.7) +
+  geom_text(aes(label = FieldID), size = 3, hjust = -0.3, vjust = 0.3) +
+  theme_bw() +
+  labs(title = "PCoA - Unweighted UniFrac (Occurrence) by Peat") +
+  stat_ellipse(aes(group = Peat), linetype = 2) +
+  guides(label = "none")
+
+p_pcoa_vacc_occur <- plot_ordination(physeq_pa, pcoa_occur, color = "Vaccinium", label = "FieldID") +
+  geom_point(size = 4, alpha = 0.7) +
+  geom_text(aes(label = FieldID), size = 3, hjust = -0.3, vjust = 0.3) +
+  theme_bw() +
+  labs(title = "PCoA - Unweighted UniFrac (Occurrence) by Vaccinium") +
+  stat_ellipse(aes(group = Vaccinium), linetype = 2) +
+  guides(label = "none")
+
+png("beta_diversity_occurrence_pcoa.png", width = 14, height = 6, units = "in", res = 300)
+grid.arrange(p_pcoa_peat_occur, p_pcoa_vacc_occur, ncol = 2)
+dev.off()
+
+# ==============================================================================
+# 9. CREATE SPECIES LISTS FOR EACH CATEGORY
+# ==============================================================================
+
+cat("\n========================================\n")
+cat("CREATING SPECIES LISTS\n")
+cat("========================================\n")
+
+# Function to extract species list from phyloseq object
+get_species_list <- function(physeq_obj, category_name) {
+  # Get OTUs present in at least one sample
+  present_otus <- taxa_sums(physeq_obj) > 0
+  otu_ids <- taxa_names(physeq_obj)[present_otus]
+  
+  # Get taxonomy for these OTUs
+  tax_table_subset <- as.data.frame(tax_table(physeq_obj)[otu_ids, ])
+  
+  # Create species identifier (use lowest available taxonomic level)
+  species_list <- apply(tax_table_subset, 1, function(x) {
+    # Find the last non-NA, non-empty taxonomic level
+    valid <- x[!is.na(x) & x != "" & x != "unidentified"]
+    if (length(valid) > 0) {
+      return(tail(valid, 1))
+    } else {
+      return(NA)
+    }
+  })
+  
+  # Remove NAs and duplicates
+  species_list <- unique(species_list[!is.na(species_list)])
+  
+  cat(paste0("\n", category_name, ": ", length(species_list), " unique taxa\n"))
+  
+  return(list(
+    species = species_list,
+    otu_ids = otu_ids,
+    taxonomy = tax_table_subset
+  ))
+}
+
+# Generate species lists for each category
+species_peat_true <- get_species_list(physeq_peat_true, "Peat = TRUE")
+species_peat_false <- get_species_list(physeq_peat_false, "Peat = FALSE")
+species_vacc_true <- get_species_list(physeq_vacc_true, "Vaccinium = TRUE")
+species_vacc_false <- get_species_list(physeq_vacc_false, "Vaccinium = FALSE")
+
+# Save species lists to files
+write.table(species_peat_true$species, 
+            "species_list_Peat_TRUE.txt", 
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(species_peat_false$species, 
+            "species_list_Peat_FALSE.txt", 
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(species_vacc_true$species, 
+            "species_list_Vaccinium_TRUE.txt", 
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(species_vacc_false$species, 
+            "species_list_Vaccinium_FALSE.txt", 
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+# Save detailed taxonomy tables
+write.table(species_peat_true$taxonomy, 
+            "taxonomy_Peat_TRUE.txt", 
+            sep = "\t", quote = FALSE)
+write.table(species_peat_false$taxonomy, 
+            "taxonomy_Peat_FALSE.txt", 
+            sep = "\t", quote = FALSE)
+write.table(species_vacc_true$taxonomy, 
+            "taxonomy_Vaccinium_TRUE.txt", 
+            sep = "\t", quote = FALSE)
+write.table(species_vacc_false$taxonomy, 
+            "taxonomy_Vaccinium_FALSE.txt", 
+            sep = "\t", quote = FALSE)
+
+# ==============================================================================
+# 10. CREATE VENN DIAGRAMS
+# ==============================================================================
+
+cat("\n========================================\n")
+cat("CREATING VENN DIAGRAMS\n")
+cat("========================================\n")
+
+# 10.1 Peat comparison (using OTU IDs for accurate counting)
+venn_peat <- list(
+  "Peat = TRUE" = species_peat_true$otu_ids,
+  "Peat = FALSE" = species_peat_false$otu_ids
+)
+
+png("venn_diagram_Peat.png", width = 8, height = 8, units = "in", res = 300)
+venn.plot.peat <- venn.diagram(
+  x = venn_peat,
+  category.names = c("Peat = TRUE", "Peat = FALSE"),
+  filename = NULL,
+  output = TRUE,
+  imagetype = "png",
+  height = 3000,
+  width = 3000,
+  resolution = 300,
+  compression = "lzw",
+  lwd = 2,
+  lty = 'blank',
+  fill = c("#E41A1C", "#377EB8"),
+  cex = 1.5,
+  fontface = "bold",
+  fontfamily = "sans",
+  cat.cex = 1.5,
+  cat.fontface = "bold",
+  cat.default.pos = "outer",
+  cat.fontfamily = "sans",
+  main = "OTU Distribution by Peat",
+  main.cex = 2
+)
+grid.draw(venn.plot.peat)
+dev.off()
+
+# 10.2 Vaccinium comparison
+venn_vacc <- list(
+  "Vaccinium = TRUE" = species_vacc_true$otu_ids,
+  "Vaccinium = FALSE" = species_vacc_false$otu_ids
+)
+
+png("venn_diagram_Vaccinium.png", width = 8, height = 8, units = "in", res = 300)
+venn.plot.vacc <- venn.diagram(
+  x = venn_vacc,
+  category.names = c("Vaccinium = TRUE", "Vaccinium = FALSE"),
+  filename = NULL,
+  output = TRUE,
+  imagetype = "png",
+  height = 3000,
+  width = 3000,
+  resolution = 300,
+  compression = "lzw",
+  lwd = 2,
+  lty = 'blank',
+  fill = c("#4DAF4A", "#984EA3"),
+  cex = 1.5,
+  fontface = "bold",
+  fontfamily = "sans",
+  cat.cex = 1.5,
+  cat.fontface = "bold",
+  cat.default.pos = "outer",
+  cat.fontfamily = "sans",
+  main = "OTU Distribution by Vaccinium",
+  main.cex = 2
+)
+grid.draw(venn.plot.vacc)
+dev.off()
+
+# 10.3 Four-way Venn diagram
+# Create all four combinations
+physeq_peat_T_vacc_T <- subset_samples(physeq, Peat == "TRUE" & Vaccinium == "TRUE")
+physeq_peat_T_vacc_F <- subset_samples(physeq, Peat == "TRUE" & Vaccinium == "FALSE")
+physeq_peat_F_vacc_T <- subset_samples(physeq, Peat == "FALSE" & Vaccinium == "TRUE")
+physeq_peat_F_vacc_F <- subset_samples(physeq, Peat == "FALSE" & Vaccinium == "FALSE")
+
+# Get OTU lists for each combination
+otus_PT_VT <- taxa_names(physeq_peat_T_vacc_T)[taxa_sums(physeq_peat_T_vacc_T) > 0]
+otus_PT_VF <- taxa_names(physeq_peat_T_vacc_F)[taxa_sums(physeq_peat_T_vacc_F) > 0]
+otus_PF_VT <- taxa_names(physeq_peat_F_vacc_T)[taxa_sums(physeq_peat_F_vacc_T) > 0]
+otus_PF_VF <- taxa_names(physeq_peat_F_vacc_F)[taxa_sums(physeq_peat_F_vacc_F) > 0]
+
+# Create four-way Venn diagram list
+venn_fourway <- list(
+  "Peat=T, Vacc=T" = otus_PT_VT,
+  "Peat=T, Vacc=F" = otus_PT_VF,
+  "Peat=F, Vacc=T" = otus_PF_VT,
+  "Peat=F, Vacc=F" = otus_PF_VF
+)
+
+# Note: VennDiagram package supports up to 5 sets
+png("venn_diagram_fourway.png", width = 10, height = 10, units = "in", res = 300)
+venn.plot.fourway <- venn.diagram(
+  x = venn_fourway,
+  category.names = c("Peat=T\nVacc=T", "Peat=T\nVacc=F", 
+                     "Peat=F\nVacc=T", "Peat=F\nVacc=F"),
+  filename = NULL,
+  output = TRUE,
+  imagetype = "png",
+  height = 3500,
+  width = 3500,
+  resolution = 300,
+  compression = "lzw",
+  lwd = 2,
+  lty = 'blank',
+  fill = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3"),
+  cex = 1.2,
+  fontface = "bold",
+  fontfamily = "sans",
+  cat.cex = 1.2,
+  cat.fontface = "bold",
+  cat.default.pos = "outer",
+  cat.pos = c(-40, 40, 135, -135),
+  cat.dist = c(0.22, 0.22, 0.11, 0.11),
+  cat.fontfamily = "sans",
+  main = "OTU Distribution Across All Categories",
+  main.cex = 1.8,
+  main.fontface = "bold"
+)
+grid.draw(venn.plot.fourway)
+dev.off()
+
+cat("\nFour-way Venn diagram saved!\n")
+cat("OTUs in Peat=T, Vacc=T:", length(otus_PT_VT), "\n")
+cat("OTUs in Peat=T, Vacc=F:", length(otus_PT_VF), "\n")
+cat("OTUs in Peat=F, Vacc=T:", length(otus_PF_VT), "\n")
+cat("OTUs in Peat=F, Vacc=F:", length(otus_PF_VF), "\n")
+
+# ==============================================================================
+# 11. CREATE PHYLOGENETIC TREE VISUALIZATION
+# ==============================================================================
+
+cat("\n========================================\n")
+cat("CREATING PHYLOGENETIC TREE\n")
+cat("========================================\n")
+
+# 11.1 Prepare tree and taxonomy data
+tree <- phy_tree(physeq)
+tax_data <- as.data.frame(tax_table(physeq))
+
+# 11.2 Create tip labels with last known taxonomy
+# Function to get the most specific taxonomic assignment
+get_last_taxonomy <- function(tax_row) {
+  # Get all non-NA, non-empty values
+  valid_tax <- tax_row[!is.na(tax_row) & tax_row != "" & 
+                         tax_row != "unidentified" & 
+                         tax_row != "uncultured"]
+  
+  if (length(valid_tax) == 0) {
+    return("Unclassified")
+  }
+  
+  # Return the last valid taxonomic level
+  last_tax <- tail(valid_tax, 1)
+  
+  # If we have genus or species, format nicely
+  if (length(valid_tax) >= 2) {
+    # Get the rank name (genus, species, etc.)
+    rank_name <- names(tail(valid_tax, 1))
+    return(paste0(last_tax, " (", rank_name, ")"))
+  }
+  
+  return(as.character(last_tax))
+}
+
+# Apply to all OTUs in the tree
+tip_labels <- sapply(1:nrow(tax_data), function(i) {
+  get_last_taxonomy(tax_data[i, ])
+})
+names(tip_labels) <- rownames(tax_data)
+
+# Match tip labels to tree tips
+tree$tip.label <- tip_labels[tree$tip.label]
+
+# 11.3 Basic tree plot with ape
+cat("Creating basic phylogenetic tree...\n")
+
+png("phylogenetic_tree_basic.png", width = 16, height = 20, units = "in", res = 300)
+par(mar = c(1, 1, 2, 1))
+plot(tree, 
+     type = "phylogram",
+     show.tip.label = TRUE,
+     tip.color = "darkblue",
+     cex = 0.4,
+     label.offset = 0.01,
+     main = "Phylogenetic Tree of Fungal OTUs",
+     no.margin = FALSE)
+
+# Add scale bar
+add.scale.bar(cex = 0.7, col = "black")
+
+# Add node labels (bootstrap values if available)
+nodelabels(text = tree$node.label, 
+           cex = 0.3, 
+           frame = "none", 
+           col = "red",
+           adj = c(1.2, -0.5))
+dev.off()
+
+# 11.4 Advanced tree with ggtree (better formatting)
+cat("Creating enhanced phylogenetic tree with ggtree...\n")
+
+# Create ggtree object
+p_tree <- ggtree(tree, layout = "rectangular", ladderize = TRUE) +
+  geom_tiplab(size = 2, align = FALSE, linesize = 0.5) +
+  geom_treescale(x = 0, y = -5, width = 0.1, offset = 1, fontsize = 3) +
+  theme_tree2() +
+  labs(title = "Phylogenetic Tree of Soil Fungal OTUs",
+       subtitle = "Tips labeled with lowest known taxonomic classification") +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5))
+
+# Save with appropriate dimensions
+ggsave("phylogenetic_tree_ggtree.png", 
+       plot = p_tree, 
+       width = 14, 
+       height = max(20, ntaxa(physeq) * 0.15), 
+       units = "cm", 
+       dpi = 300,
+       limitsize = FALSE)
+
+# 11.5 Circular tree layout (alternative visualization)
+cat("Creating circular phylogenetic tree...\n")
+
+p_tree_circular <- ggtree(tree, layout = "circular", ladderize = TRUE) +
+  geom_tiplab(size = 2, offset = 0.05) +
+  theme_tree() +
+  labs(title = "Circular Phylogenetic Tree of Soil Fungal OTUs") +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+
+ggsave("phylogenetic_tree_circular.png", 
+       plot = p_tree_circular, 
+       width = 16, 
+       height = 16, 
+       units = "in", 
+       dpi = 300)
+
+# 11.6 Tree with taxonomy color coding by phylum
+cat("Creating taxonomy-colored phylogenetic tree...\n")
+
+# Add phylum information to tree data
+tree_data <- data.frame(
+  OTU = taxa_names(physeq),
+  Phylum = as.character(tax_table(physeq)[, "Phylum"])
+)
+tree_data$Phylum[is.na(tree_data$Phylum)] <- "Unclassified"
+
+# Create color palette for phyla
+n_phyla <- length(unique(tree_data$Phylum))
+phylum_colors <- rainbow(n_phyla)
+names(phylum_colors) <- unique(tree_data$Phylum)
+
+# Match tree tips to phylum data
+tip_phyla <- tree_data$Phylum[match(names(tip_labels), tree_data$OTU)]
+
+p_tree_colored <- ggtree(tree, layout = "rectangular", ladderize = TRUE) %<+% 
+  tree_data +
+  geom_tiplab(aes(color = Phylum), size = 2, align = FALSE) +
+  scale_color_manual(values = phylum_colors) +
+  geom_treescale(x = 0, y = -5, width = 0.1, fontsize = 3) +
+  theme_tree2() +
+  labs(title = "Phylogenetic Tree Colored by Phylum",
+       subtitle = "Tips labeled with lowest known taxonomic classification") +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5),
+        legend.position = "right",
+        legend.title = element_text(size = 12, face = "bold"),
+        legend.text = element_text(size = 10))
+
+ggsave("phylogenetic_tree_colored.png", 
+       plot = p_tree_colored, 
+       width = 16, 
+       height = max(20, ntaxa(physeq) * 0.15), 
+       units = "cm", 
+       dpi = 300,
+       limitsize = FALSE)
+
+# 11.7 Export tree in Newick format with updated labels
+cat("Exporting tree with taxonomic labels...\n")
+write.tree(tree, "phylogenetic_tree_labeled.nwk")
+
+cat("\n========================================\n")
+cat("ANALYSIS COMPLETE!\n")
+cat("========================================\n")
+cat("\nGenerated files:\n")
+cat("  Alpha diversity plots:\n")
+cat("    - alpha_diversity_abundance.png\n")
+cat("    - alpha_diversity_occurrence.png\n")
+cat("  Beta diversity plots:\n")
+cat("    - beta_diversity_abundance_nmds.png\n")
+cat("    - beta_diversity_abundance_pcoa.png\n")
+cat("    - beta_diversity_occurrence_nmds.png\n")
+cat("    - beta_diversity_occurrence_pcoa.png\n")
+cat("  Species lists:\n")
+cat("    - species_list_Peat_TRUE.txt\n")
+cat("    - species_list_Peat_FALSE.txt\n")
+cat("    - species_list_Vaccinium_TRUE.txt\n")
+cat("    - species_list_Vaccinium_FALSE.txt\n")
+cat("    - taxonomy_Peat_TRUE.txt\n")
+cat("    - taxonomy_Peat_FALSE.txt\n")
+cat("    - taxonomy_Vaccinium_TRUE.txt\n")
+cat("    - taxonomy_Vaccinium_FALSE.txt\n")
+cat("  Venn diagrams:\n")
+cat("    - venn_diagram_Peat.png\n")
+cat("    - venn_diagram_Vaccinium.png\n")
+cat("    - venn_diagram_fourway.png\n")
+cat("  Phylogenetic trees:\n")
+cat("    - phylogenetic_tree_basic.png\n")
+cat("    - phylogenetic_tree_ggtree.png\n")
+cat("    - phylogenetic_tree_circular.png\n")
+cat("    - phylogenetic_tree_colored.png\n")
+cat("    - phylogenetic_tree_labeled.nwk\n")
+cat("\n========================================\n")
