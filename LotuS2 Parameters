@@ -1,0 +1,19 @@
+# LotuS2 Parameters 
+
+> recommended by Galaxy Training: https://training.galaxyproject.org/training-material/topics/microbiome/tutorials/lotus2-identifying-fungi/tutorial.html
+
+"Clustering algorithm": VSEARCH
+
+"Taxonomy aligner for taxonomic profiling of OTUs": Lamda, LCA against custom reference database
+    "Using reference database": ITS fungi specific (UNITE)
+
+In "Other Clustering Options":
+     "Minimum size of dereplicated raw reads (optional)": 10:1, 5:2, 3:3
+
+In "Other Taxonomy Options": 
+      "Amplicon type": ITS2
+      "Tax group": fungal 18S/23S/ITS annotation
+
+# Outputs
+OTU.biom
+OTU.phylo.nwk
