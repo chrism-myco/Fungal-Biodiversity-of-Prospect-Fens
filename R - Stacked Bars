@@ -1,0 +1,838 @@
+# ==============================================================================
+# STACKED BAR CHARTS FOR OTU GUILD ANALYSIS
+# ==============================================================================
+# This script creates eight stacked bar charts:
+# GUILD ANALYSIS:
+# 1. Abundance-based: Shows relative abundance of each guild per sample
+# 2. Richness-based: Shows number of OTUs from each guild per sample
+# 3. Occurrence-based (relative): Shows proportion of OTUs from each guild per sample
+# 4. Total abundance (absolute): Shows total read counts per guild per sample
+# PHYLUM ANALYSIS:
+# 9. Relative abundance by phylum
+# 10. Absolute abundance by phylum
+# 11. Relative occurrence by phylum
+# 12. Absolute occurrence by phylum
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# LOAD REQUIRED LIBRARIES
+# ------------------------------------------------------------------------------
+library(biomformat)  # For reading .biom files
+library(tidyverse)   # For data manipulation and ggplot2
+library(reshape2)    # For data reshaping
+
+# ------------------------------------------------------------------------------
+# READ INPUT FILES
+# ------------------------------------------------------------------------------
+
+# Read the OTU table from BIOM format
+# BIOM files are a standard format for biological observation matrices
+otu_biom <- read_biom("~/Downloads/FenData/R_Studio/FENS.ITS.StkBr.wG.wPhy_20260505/data/OTU.biom")
+
+# Extract the OTU table as a matrix (OTUs as rows, samples as columns)
+otu_table <- as.matrix(biom_data(otu_biom))
+
+# Convert to data frame and add OTU_ID as a column
+otu_df <- as.data.frame(otu_table)
+otu_df$OTU_ID <- rownames(otu_df)
+
+# Read guild metadata (links each OTU to its functional guild)
+guild_metadata <- read.csv("~/Downloads/FenData/R_Studio/FENS.ITS.StkBr.wG.wPhy_20260505/data/guild_metadata.csv", stringsAsFactors = FALSE)
+
+# Read sample metadata (contains Field.ID labels for samples)
+sample_metadata <- read.csv("~/Downloads/FenData/R_Studio/FENS.ITS.StkBr.wG.wPhy_20260505/data/sample_metadata.csv", stringsAsFactors = FALSE)
+
+# extract OTU taxonomy from BIOM file
+tax_data <- observation_metadata(otu_biom)
+
+# create phylum dataframe
+phylum_df <- data.frame(
+  OTU_ID = row.names(tax_data),
+  Phylum = tax_data$taxonomy2
+)
+# clean Phylum Values
+phylum_df$Phylum <- gsub("p__", "", as.character(phylum_df$Phylum))
+
+# filter for fungi
+phylum_df <- phylum_df %>%
+  filter(grepl("Ascomycota|Basidiomycota|Chytridiomycota|
+                Mucuromycota|Rozellomycota|Monoblepharomycota|
+                Olpidiomycota|Entorrhizomycota|
+                Basidiobolomycota|Glomeromycota|Mortierellomycota|
+                Fungi_phy_Incertae_sedis|Blastocladiomycota|
+                Aphelidiomycota|Zoopagomycota|Kickxellomycota", Phylum)
+         )
+
+# ------------------------------------------------------------------------------
+# DATA VALIDATION AND CLEANING
+# ------------------------------------------------------------------------------
+
+# Ensure guild values are standardized (remove extra whitespace)
+guild_metadata$Guild <- trimws(guild_metadata$Guild)
+
+# Verify unique guild values
+print(unique(guild_metadata$Guild))
+
+# ------------------------------------------------------------------------------
+# MERGE OTU DATA WITH GUILD INFORMATION
+# ------------------------------------------------------------------------------
+
+# Join OTU table with guild metadata to assign guilds to each OTU
+otu_with_guild <- otu_df %>%
+  left_join(guild_metadata, by = "OTU_ID")
+
+# Remove OTUs without guild assignment
+otu_with_guild <- otu_with_guild %>%
+  filter(!is.na(Guild))
+
+# Create separate dataset for phylum analysis
+otu_with_phylum <- otu_df %>%
+  left_join(phylum_df, by = "OTU_ID")
+# again filter for fungi
+otu_with_phylum <- otu_with_phylum %>%
+  filter(!is.na(Phylum))
+
+# ------------------------------------------------------------------------------
+# PREPARE DATA FOR ABUNDANCE-BASED CHART (ALL GUILDS)
+# ------------------------------------------------------------------------------
+
+# Reshape data from wide to long format for ggplot
+# This converts sample columns into rows
+otu_long <- otu_with_guild %>%
+  pivot_longer(cols = -c(OTU_ID, Guild), 
+               names_to = "SampleID", 
+               values_to = "Abundance")
+
+# Calculate total abundance for each guild in each sample
+abundance_summary <- otu_long %>%
+  group_by(SampleID, Guild) %>%
+  summarise(Total_Abundance = sum(Abundance), .groups = "drop")
+
+# Calculate relative abundance (proportions) within each sample
+abundance_summary <- abundance_summary %>%
+  group_by(SampleID) %>%
+  mutate(Relative_Abundance = Total_Abundance / sum(Total_Abundance) * 100) %>%
+  ungroup()
+
+# ------------------------------------------------------------------------------
+# PREPARE DATA FOR RICHNESS-BASED CHART (ALL GUILDS)
+# ------------------------------------------------------------------------------
+
+# Richness = count of unique OTUs present (abundance > 0) per guild per sample
+otu_richness <- otu_long %>%
+  filter(Abundance > 0) %>%  # Only count OTUs that are present
+  group_by(SampleID, Guild) %>%
+  summarise(OTU_Richness = n(), .groups = "drop")  # Count unique OTUs
+
+# Note: This is the absolute richness (count), not relative
+# We keep it as counts for the stacked bar chart
+
+# ------------------------------------------------------------------------------
+# PREPARE DATA FOR OCCURRENCE-BASED CHART (ALL GUILDS)
+# ------------------------------------------------------------------------------
+
+# For occurrence, we only care if an OTU is present (>0), not its abundance
+otu_occurrence <- otu_long %>%
+  mutate(Present = ifelse(Abundance > 0, 1, 0))
+
+# Count number of OTUs from each guild present in each sample
+occurrence_summary <- otu_occurrence %>%
+  group_by(SampleID, Guild) %>%
+  summarise(OTU_Count = sum(Present), .groups = "drop")
+
+# Calculate proportion of OTUs from each guild within each sample
+occurrence_summary <- occurrence_summary %>%
+  group_by(SampleID) %>%
+  mutate(Relative_Occurrence = OTU_Count / sum(OTU_Count) * 100) %>%
+  ungroup()
+
+# ------------------------------------------------------------------------------
+# ADD Field.ID LABELS TO ALL DATASETS
+# ------------------------------------------------------------------------------
+
+# Match SampleID to Field.ID for better labeling on charts
+abundance_summary <- abundance_summary %>%
+  left_join(sample_metadata %>% select(SampleID, `Field.ID`), 
+            by = "SampleID")
+
+otu_richness <- otu_richness %>%
+  left_join(sample_metadata %>% select(SampleID, `Field.ID`), 
+            by = "SampleID")
+
+occurrence_summary <- occurrence_summary %>%
+  left_join(sample_metadata %>% select(SampleID, `Field.ID`), 
+            by = "SampleID")
+
+
+# Use Field.ID if available, otherwise use SampleID
+abundance_summary <- abundance_summary %>%
+  mutate(Label = ifelse(!is.na(`Field.ID`), `Field.ID`, SampleID))
+
+otu_richness <- otu_richness %>%
+  mutate(Label = ifelse(!is.na(`Field.ID`), `Field.ID`, SampleID))
+
+occurrence_summary <- occurrence_summary %>%
+  mutate(Label = ifelse(!is.na(`Field.ID`), `Field.ID`, SampleID))
+
+# ------------------------------------------------------------------------------
+# PREPARE DATA FOR PHYLUM ANALYSIS
+# ------------------------------------------------------------------------------
+
+# Reshape phylum data from wide to long format
+otu_phylum_long <- otu_with_phylum %>%
+  pivot_longer(cols = -c(OTU_ID, Phylum), 
+               names_to = "SampleID", 
+               values_to = "Abundance")
+
+# Calculate total abundance for each phylum in each sample
+phylum_abundance_summary <- otu_phylum_long %>%
+  group_by(SampleID, Phylum) %>%
+  summarise(Total_Abundance = sum(Abundance), .groups = "drop")
+
+# Calculate relative abundance (proportions) within each sample
+phylum_abundance_summary <- phylum_abundance_summary %>%
+  group_by(SampleID) %>%
+  mutate(Relative_Abundance = Total_Abundance / sum(Total_Abundance) * 100) %>%
+  ungroup()
+
+# Calculate occurrence for phylum
+otu_phylum_occurrence <- otu_phylum_long %>%
+  mutate(Present = ifelse(Abundance > 0, 1, 0))
+
+phylum_occurrence_summary <- otu_phylum_occurrence %>%
+  group_by(SampleID, Phylum) %>%
+  summarise(OTU_Count = sum(Present), .groups = "drop")
+
+# Calculate relative occurrence
+phylum_occurrence_summary <- phylum_occurrence_summary %>%
+  group_by(SampleID) %>%
+  mutate(Relative_Occurrence = OTU_Count / sum(OTU_Count) * 100) %>%
+  ungroup()
+
+# Add Field.ID labels to phylum datasets
+phylum_abundance_summary <- phylum_abundance_summary %>%
+  left_join(sample_metadata %>% select(SampleID, `Field.ID`), by = "SampleID") %>%
+  mutate(Label = ifelse(!is.na(`Field.ID`), `Field.ID`, SampleID))
+
+phylum_occurrence_summary <- phylum_occurrence_summary %>%
+  left_join(sample_metadata %>% select(SampleID, `Field.ID`), by = "SampleID") %>%
+  mutate(Label = ifelse(!is.na(`Field.ID`), `Field.ID`, SampleID))
+
+# ------------------------------------------------------------------------------
+# DEFINE COLOR PALETTE FOR GUILDS
+# ------------------------------------------------------------------------------
+
+# Create a consistent color scheme for all guilds
+guild_colors <- c(
+  "Endophyte" = "#1f77b4",              # Blue
+  "Epiphyte-Saprotroph" = "#1f50b1",    # Dark Blue
+  "Saprotroph" = "#ff7f0e",             # Orange
+  "Saprotroph-Symbiotroph" = "#2ca02c", # Green
+  "Pathogen-Saprotroph" = "#d62728",    # Red
+  "Pathogen" = "#F0E442",               # Yellow
+  "Ectomycorrhizal" = "#e377c2",        # Pink
+  "Lichenized" = "#bcbd22",             # Yellow-green
+  "Arbuscular" = "#8c564b",             # Brown      
+  "Orchid Mycorrhizal" = "#B23AEE",     # darkorchid
+  "Ericoid Mycorrhizal" = "#FFF8DC",    # cornsilk
+  "Chytrid" = "#56B4E9",                # Light Blue
+  "Unassigned" = "#7f7f7f"              # Gray
+)
+
+# Create a color palette for phyla (will be generated dynamically based on phyla present)
+# Using a color-blind friendly palette
+get_phylum_colors <- function(phyla) {
+  n_phyla <- length(phyla)
+  if (n_phyla <= 15) {
+    # Use a predefined palette for common numbers
+    colors <- c("#e6194B", "#3cb44b", "#ffe119", "#4363d8", "#f58231", 
+                "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4", 
+                "#469990", "#dcbeff")
+    color_map <- setNames(colors[1:n_phyla], phyla)
+  } else {
+    # Generate colors using rainbow palette for larger numbers
+    color_map <- setNames(rainbow(n_phyla), phyla)
+  }
+  return(color_map)
+}
+
+phylum_colors <- get_phylum_colors(unique(phylum_abundance_summary$Phylum))
+
+# ------------------------------------------------------------------------------
+# CREATE ABUNDANCE-BASED STACKED BAR CHART (ALL GUILDS)
+# ------------------------------------------------------------------------------
+
+abundance_plot <- ggplot(abundance_summary, 
+                         aes(x = Label, y = Relative_Abundance, fill = Guild)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = guild_colors) +
+  labs(title = "Relative Abundance of Fungal Guilds by Sample",
+       x = "Sample (Field.ID)",
+       y = "Relative Abundance (%)",
+       fill = "Functional Guild") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(abundance_plot)
+ggsave("OTU_Guild_Abundance_StackedBar.png", 
+       plot = abundance_plot, width = 12, height = 7, dpi = 300)
+
+# ------------------------------------------------------------------------------
+# CREATE RICHNESS-BASED STACKED BAR CHART (ALL GUILDS)
+# ------------------------------------------------------------------------------
+
+richness_plot <- ggplot(otu_richness, 
+                        aes(x = Label, y = OTU_Richness, fill = Guild)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = guild_colors) +
+  labs(title = "OTU Richness by Fungal Guild and Sample",
+       subtitle = "Total number of unique OTUs per guild",
+       x = "Sample (Field.ID)",
+       y = "Number of OTUs (Richness)",
+       fill = "Functional Guild") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(richness_plot)
+ggsave("OTU_Guild_Richness_StackedBar.png", 
+       plot = richness_plot, width = 12, height = 7, dpi = 300)
+
+# ------------------------------------------------------------------------------
+# CREATE OCCURRENCE-BASED STACKED BAR CHART (ALL GUILDS)
+# ------------------------------------------------------------------------------
+
+occurrence_plot <- ggplot(occurrence_summary, 
+                          aes(x = Label, y = Relative_Occurrence, fill = Guild)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = guild_colors) +
+  labs(title = "Relative Occurrence of Fungal Guilds by Sample",
+       subtitle = "Based on proportion of OTUs present",
+       x = "Sample (Field.ID)",
+       y = "Relative Occurrence (%)",
+       fill = "Functional Guild") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(occurrence_plot)
+ggsave("OTU_Guild_Occurrence_StackedBar.png", 
+       plot = occurrence_plot, width = 12, height = 7, dpi = 300)
+
+# ------------------------------------------------------------------------------
+# CREATE TOTAL ABUNDANCE STACKED BAR CHART - ABSOLUTE COUNTS (ALL GUILDS)
+# ------------------------------------------------------------------------------
+
+total_abundance_plot <- ggplot(abundance_summary, 
+                               aes(x = Label, y = Total_Abundance, fill = Guild)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = guild_colors) +
+  labs(title = "Total Abundance of Fungal Guilds by Sample",
+       subtitle = "Total read counts per guild",
+       x = "Sample (Field.ID)",
+       y = "Total Abundance (Read Counts)",
+       fill = "Functional Guild") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(total_abundance_plot)
+ggsave("OTU_Guild_Total_Abundance_StackedBar.png", 
+       plot = total_abundance_plot, width = 12, height = 7, dpi = 300)
+
+# ------------------------------------------------------------------------------
+# CREATE PHYLUM-BASED STACKED BAR CHARTS
+# ------------------------------------------------------------------------------
+
+# Relative Abundance by Phylum
+phylum_rel_abundance_plot <- ggplot(phylum_abundance_summary, 
+                                    aes(x = Label, y = Relative_Abundance, fill = Phylum)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = phylum_colors) +
+  labs(title = "Relative Abundance by Phylum",
+       x = "Sample (Field.ID)",
+       y = "Relative Abundance (%)",
+       fill = "Phylum") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(phylum_rel_abundance_plot)
+ggsave("OTU_Phylum_Relative_Abundance_StackedBar.png", 
+       plot = phylum_rel_abundance_plot, width = 12, height = 7, dpi = 300)
+
+# Absolute Abundance by Phylum
+phylum_abs_abundance_plot <- ggplot(phylum_abundance_summary, 
+                                    aes(x = Label, y = Total_Abundance, fill = Phylum)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = phylum_colors) +
+  labs(title = "Total Abundance by Phylum",
+       subtitle = "Total read counts per phylum",
+       x = "Sample (Field.ID)",
+       y = "Total Abundance (Read Counts)",
+       fill = "Phylum") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(phylum_abs_abundance_plot)
+ggsave("OTU_Phylum_Total_Abundance_StackedBar.png", 
+       plot = phylum_abs_abundance_plot, width = 12, height = 7, dpi = 300)
+
+# Relative Occurrence by Phylum
+phylum_rel_occurrence_plot <- ggplot(phylum_occurrence_summary, 
+                                     aes(x = Label, y = Relative_Occurrence, fill = Phylum)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = phylum_colors) +
+  labs(title = "Relative Occurrence by Phylum",
+       subtitle = "Based on proportion of OTUs present",
+       x = "Sample (Field.ID)",
+       y = "Relative Occurrence (%)",
+       fill = "Phylum") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(phylum_rel_occurrence_plot)
+ggsave("OTU_Phylum_Relative_Occurrence_StackedBar.png", 
+       plot = phylum_rel_occurrence_plot, width = 12, height = 7, dpi = 300)
+
+# Absolute Occurrence by Phylum
+phylum_abs_occurrence_plot <- ggplot(phylum_occurrence_summary, 
+                                     aes(x = Label, y = OTU_Count, fill = Phylum)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", linewidth = 0.3) +
+  scale_fill_manual(values = phylum_colors) +
+  labs(title = "Absolute Occurrence by Phylum",
+       subtitle = "Total number of OTUs present per phylum",
+       x = "Sample (Field.ID)",
+       y = "Number of OTUs",
+       fill = "Phylum") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(phylum_abs_occurrence_plot)
+ggsave("OTU_Phylum_Absolute_Occurrence_StackedBar.png", 
+       plot = phylum_abs_occurrence_plot, width = 12, height = 7, dpi = 300)
+
+# ------------------------------------------------------------------------------
+# SUM OF SQUARES ANALYSIS FOR RELATIVE ABUNDANCE
+# ------------------------------------------------------------------------------
+
+# Calculate mean relative abundance for each guild across all samples
+guild_means <- abundance_summary %>%
+  group_by(Guild) %>%
+  summarise(Mean_Relative_Abundance = mean(Relative_Abundance),
+            .groups = "drop")
+
+# Calculate Total Sum of Squares (TSS)
+# This measures total variation in relative abundance across all samples and guilds
+grand_mean <- mean(abundance_summary$Relative_Abundance)
+TSS <- sum((abundance_summary$Relative_Abundance - grand_mean)^2)
+
+# Calculate Between-Group Sum of Squares (BSS)
+# This measures variation between guilds (how different guild means are from grand mean)
+abundance_with_means <- abundance_summary %>%
+  left_join(guild_means, by = "Guild")
+
+BSS <- sum((abundance_with_means$Mean_Relative_Abundance - grand_mean)^2)
+
+# Calculate Within-Group Sum of Squares (WSS)
+# This measures variation within each guild (how samples vary within each guild)
+WSS <- sum((abundance_with_means$Relative_Abundance - 
+              abundance_with_means$Mean_Relative_Abundance)^2)
+
+# Calculate proportion of variance explained by guild classification
+R_squared <- BSS / TSS
+
+# Create summary table
+ss_summary_abundance <- data.frame(
+  Source = c("Between Guilds (BSS)", "Within Guilds (WSS)", "Total (TSS)"),
+  Sum_of_Squares = c(BSS, WSS, TSS),
+  Proportion_of_Total = c(BSS/TSS, WSS/TSS, 1.0),
+  Percentage = c(BSS/TSS * 100, WSS/TSS * 100, 100)
+)
+
+# Calculate sum of squares for each individual guild
+guild_ss_abundance <- abundance_summary %>%
+  left_join(guild_means, by = "Guild") %>%
+  group_by(Guild) %>%
+  summarise(
+    Mean_Relative_Abundance = first(Mean_Relative_Abundance),
+    Within_Guild_SS = sum((Relative_Abundance - Mean_Relative_Abundance)^2),
+    N_Samples = n(),
+    Variance = Within_Guild_SS / (N_Samples - 1),
+    Std_Dev = sqrt(Variance),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Mean_Relative_Abundance))
+
+# Add contribution to total variation
+guild_ss_abundance <- guild_ss_abundance %>%
+  mutate(
+    Percent_of_WSS = Within_Guild_SS / WSS * 100,
+    CV = (Std_Dev / Mean_Relative_Abundance) * 100  # Coefficient of variation
+  )
+
+# Print results to console
+cat("\n=== SUM OF SQUARES ANALYSIS - RELATIVE ABUNDANCE ===\n")
+cat("\nOverall Variation Decomposition:\n")
+print(ss_summary_abundance, row.names = FALSE)
+cat("\nR-squared (proportion of variance explained by guilds):", 
+    round(R_squared, 4), "\n")
+cat("\nInterpretation:")
+cat("\n  - Between-group variation (BSS) represents how different the guilds are from each other")
+cat("\n  - Within-group variation (WSS) represents variation among samples within each guild")
+cat("\n  - R-squared shows what proportion of total variation is explained by guild identity\n")
+
+cat("\n\nGuild-Specific Variation:\n")
+print(guild_ss_abundance, row.names = FALSE)
+cat("\nInterpretation:")
+cat("\n  - Within_Guild_SS: Total variation within that guild")
+cat("\n  - Std_Dev: Standard deviation of relative abundance for that guild")
+cat("\n  - CV: Coefficient of variation (higher = more variable across samples)")
+cat("\n  - Percent_of_WSS: This guild's contribution to within-group variation\n")
+
+# ------------------------------------------------------------------------------
+# SUM OF SQUARES ANALYSIS FOR RELATIVE OCCURRENCE
+# ------------------------------------------------------------------------------
+
+# Calculate mean relative occurrence for each guild across all samples
+guild_means_occurrence <- occurrence_summary %>%
+  group_by(Guild) %>%
+  summarise(Mean_Relative_Occurrence = mean(Relative_Occurrence),
+            .groups = "drop")
+
+# Calculate Total Sum of Squares (TSS)
+grand_mean_occ <- mean(occurrence_summary$Relative_Occurrence)
+TSS_occ <- sum((occurrence_summary$Relative_Occurrence - grand_mean_occ)^2)
+
+# Calculate Between-Group Sum of Squares (BSS)
+occurrence_with_means <- occurrence_summary %>%
+  left_join(guild_means_occurrence, by = "Guild")
+
+BSS_occ <- sum((occurrence_with_means$Mean_Relative_Occurrence - grand_mean_occ)^2)
+
+# Calculate Within-Group Sum of Squares (WSS)
+WSS_occ <- sum((occurrence_with_means$Relative_Occurrence - 
+                  occurrence_with_means$Mean_Relative_Occurrence)^2)
+
+# Calculate proportion of variance explained by guild classification
+R_squared_occ <- BSS_occ / TSS_occ
+
+# Create summary table
+ss_summary_occurrence <- data.frame(
+  Source = c("Between Guilds (BSS)", "Within Guilds (WSS)", "Total (TSS)"),
+  Sum_of_Squares = c(BSS_occ, WSS_occ, TSS_occ),
+  Proportion_of_Total = c(BSS_occ/TSS_occ, WSS_occ/TSS_occ, 1.0),
+  Percentage = c(BSS_occ/TSS_occ * 100, WSS_occ/TSS_occ * 100, 100)
+)
+
+# Calculate sum of squares for each individual guild
+guild_ss_occurrence <- occurrence_summary %>%
+  left_join(guild_means_occurrence, by = "Guild") %>%
+  group_by(Guild) %>%
+  summarise(
+    Mean_Relative_Occurrence = first(Mean_Relative_Occurrence),
+    Within_Guild_SS = sum((Relative_Occurrence - Mean_Relative_Occurrence)^2),
+    N_Samples = n(),
+    Variance = Within_Guild_SS / (N_Samples - 1),
+    Std_Dev = sqrt(Variance),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Mean_Relative_Occurrence))
+
+# Add contribution to total variation
+guild_ss_occurrence <- guild_ss_occurrence %>%
+  mutate(
+    Percent_of_WSS = Within_Guild_SS / WSS_occ * 100,
+    CV = (Std_Dev / Mean_Relative_Occurrence) * 100  # Coefficient of variation
+  )
+
+# Print results to console
+cat("\n\n=== SUM OF SQUARES ANALYSIS - RELATIVE OCCURRENCE ===\n")
+cat("\nOverall Variation Decomposition:\n")
+print(ss_summary_occurrence, row.names = FALSE)
+cat("\nR-squared (proportion of variance explained by guilds):", 
+    round(R_squared_occ, 4), "\n")
+cat("\nInterpretation:")
+cat("\n  - Between-group variation (BSS) represents how different the guilds are from each other")
+cat("\n  - Within-group variation (WSS) represents variation among samples within each guild")
+cat("\n  - R-squared shows what proportion of total variation is explained by guild identity\n")
+
+cat("\n\nGuild-Specific Variation:\n")
+print(guild_ss_occurrence, row.names = FALSE)
+cat("\nInterpretation:")
+cat("\n  - Within_Guild_SS: Total variation within that guild")
+cat("\n  - Std_Dev: Standard deviation of relative occurrence for that guild")
+cat("\n  - CV: Coefficient of variation (higher = more variable across samples)")
+cat("\n  - Percent_of_WSS: This guild's contribution to within-group variation\n")
+
+
+# ------------------------------------------------------------------------------
+# SUM OF SQUARES ANALYSIS FOR PHYLUM - RELATIVE ABUNDANCE
+# ------------------------------------------------------------------------------
+
+# Calculate mean relative abundance for each phylum across all samples
+phylum_means_abundance <- phylum_abundance_summary %>%
+  group_by(Phylum) %>%
+  summarise(Mean_Relative_Abundance = mean(Relative_Abundance),
+            .groups = "drop")
+
+# Calculate Total Sum of Squares (TSS)
+grand_mean_phylum <- mean(phylum_abundance_summary$Relative_Abundance)
+TSS_phylum <- sum((phylum_abundance_summary$Relative_Abundance - grand_mean_phylum)^2)
+
+# Calculate Between-Group Sum of Squares (BSS)
+phylum_abundance_with_means <- phylum_abundance_summary %>%
+  left_join(phylum_means_abundance, by = "Phylum")
+
+BSS_phylum <- sum((phylum_abundance_with_means$Mean_Relative_Abundance - grand_mean_phylum)^2)
+
+# Calculate Within-Group Sum of Squares (WSS)
+WSS_phylum <- sum((phylum_abundance_with_means$Relative_Abundance - 
+                     phylum_abundance_with_means$Mean_Relative_Abundance)^2)
+
+# Calculate proportion of variance explained
+R_squared_phylum <- BSS_phylum / TSS_phylum
+
+# Create summary table
+ss_summary_phylum_abundance <- data.frame(
+  Source = c("Between Phyla (BSS)", "Within Phyla (WSS)", "Total (TSS)"),
+  Sum_of_Squares = c(BSS_phylum, WSS_phylum, TSS_phylum),
+  Proportion_of_Total = c(BSS_phylum/TSS_phylum, WSS_phylum/TSS_phylum, 1.0),
+  Percentage = c(BSS_phylum/TSS_phylum * 100, WSS_phylum/TSS_phylum * 100, 100)
+)
+
+# Calculate sum of squares for each individual phylum
+phylum_ss_abundance <- phylum_abundance_summary %>%
+  left_join(phylum_means_abundance, by = "Phylum") %>%
+  group_by(Phylum) %>%
+  summarise(
+    Mean_Relative_Abundance = first(Mean_Relative_Abundance),
+    Within_Phylum_SS = sum((Relative_Abundance - Mean_Relative_Abundance)^2),
+    N_Samples = n(),
+    Variance = Within_Phylum_SS / (N_Samples - 1),
+    Std_Dev = sqrt(Variance),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Mean_Relative_Abundance))
+
+phylum_ss_abundance <- phylum_ss_abundance %>%
+  mutate(
+    Percent_of_WSS = Within_Phylum_SS / WSS_phylum * 100,
+    CV = (Std_Dev / Mean_Relative_Abundance) * 100
+  )
+
+cat("\n\n=== SUM OF SQUARES ANALYSIS - PHYLUM RELATIVE ABUNDANCE ===\n")
+cat("\nOverall Variation Decomposition:\n")
+print(ss_summary_phylum_abundance, row.names = FALSE)
+cat("\nR-squared (proportion of variance explained by phyla):", 
+    round(R_squared_phylum, 4), "\n")
+
+cat("\n\nPhylum-Specific Variation:\n")
+print(phylum_ss_abundance, row.names = FALSE)
+
+# ------------------------------------------------------------------------------
+# SUM OF SQUARES ANALYSIS FOR PHYLUM - RELATIVE OCCURRENCE
+# ------------------------------------------------------------------------------
+
+# Calculate mean relative occurrence for each phylum
+phylum_means_occurrence <- phylum_occurrence_summary %>%
+  group_by(Phylum) %>%
+  summarise(Mean_Relative_Occurrence = mean(Relative_Occurrence),
+            .groups = "drop")
+
+# Calculate Total Sum of Squares (TSS)
+grand_mean_phylum_occ <- mean(phylum_occurrence_summary$Relative_Occurrence)
+TSS_phylum_occ <- sum((phylum_occurrence_summary$Relative_Occurrence - grand_mean_phylum_occ)^2)
+
+# Calculate Between-Group Sum of Squares (BSS)
+phylum_occurrence_with_means <- phylum_occurrence_summary %>%
+  left_join(phylum_means_occurrence, by = "Phylum")
+
+BSS_phylum_occ <- sum((phylum_occurrence_with_means$Mean_Relative_Occurrence - grand_mean_phylum_occ)^2)
+
+# Calculate Within-Group Sum of Squares (WSS)
+WSS_phylum_occ <- sum((phylum_occurrence_with_means$Relative_Occurrence - 
+                         phylum_occurrence_with_means$Mean_Relative_Occurrence)^2)
+
+# Calculate proportion of variance explained
+R_squared_phylum_occ <- BSS_phylum_occ / TSS_phylum_occ
+
+# Create summary table
+ss_summary_phylum_occurrence <- data.frame(
+  Source = c("Between Phyla (BSS)", "Within Phyla (WSS)", "Total (TSS)"),
+  Sum_of_Squares = c(BSS_phylum_occ, WSS_phylum_occ, TSS_phylum_occ),
+  Proportion_of_Total = c(BSS_phylum_occ/TSS_phylum_occ, WSS_phylum_occ/TSS_phylum_occ, 1.0),
+  Percentage = c(BSS_phylum_occ/TSS_phylum_occ * 100, WSS_phylum_occ/TSS_phylum_occ * 100, 100)
+)
+
+# Calculate sum of squares for each individual phylum
+phylum_ss_occurrence <- phylum_occurrence_summary %>%
+  left_join(phylum_means_occurrence, by = "Phylum") %>%
+  group_by(Phylum) %>%
+  summarise(
+    Mean_Relative_Occurrence = first(Mean_Relative_Occurrence),
+    Within_Phylum_SS = sum((Relative_Occurrence - Mean_Relative_Occurrence)^2),
+    N_Samples = n(),
+    Variance = Within_Phylum_SS / (N_Samples - 1),
+    Std_Dev = sqrt(Variance),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Mean_Relative_Occurrence))
+
+phylum_ss_occurrence <- phylum_ss_occurrence %>%
+  mutate(
+    Percent_of_WSS = Within_Phylum_SS / WSS_phylum_occ * 100,
+    CV = (Std_Dev / Mean_Relative_Occurrence) * 100
+  )
+
+cat("\n\n=== SUM OF SQUARES ANALYSIS - PHYLUM RELATIVE OCCURRENCE ===\n")
+cat("\nOverall Variation Decomposition:\n")
+print(ss_summary_phylum_occurrence, row.names = FALSE)
+cat("\nR-squared (proportion of variance explained by phyla):", 
+    round(R_squared_phylum_occ, 4), "\n")
+
+cat("\n\nPhylum-Specific Variation:\n")
+print(phylum_ss_occurrence, row.names = FALSE)
+
+# ------------------------------------------------------------------------------
+# EXPORT SUMMARY STATISTICS
+# ------------------------------------------------------------------------------
+
+write.csv(abundance_summary, "Guild_Abundance_Summary.csv", row.names = FALSE)
+write.csv(ss_summary_abundance, "Sum_of_Squares_Abundance_Summary.csv", row.names = FALSE)
+write.csv(guild_ss_abundance, "Guild_Specific_Variation_Abundance.csv", row.names = FALSE)
+write.csv(otu_richness, "Guild_Richness_Summary.csv", row.names = FALSE)
+write.csv(ss_summary_occurrence, "Sum_of_Squares_Occurrence_Summary.csv", row.names = FALSE)
+write.csv(guild_ss_occurrence, "Guild_Specific_Variation_Occurrence.csv", row.names = FALSE)
+write.csv(otu_richness, "Guild_Richness_Summary.csv", row.names = FALSE)
+write.csv(occurrence_summary, "Guild_Occurrence_Summary.csv", row.names = FALSE)
+
+# ------------------------------------------------------------------------------
+# PRINT SUMMARY INFORMATION
+# ------------------------------------------------------------------------------
+
+cat("\n=== Analysis Complete ===\n")
+cat("Total samples analyzed:", length(unique(abundance_summary$SampleID)), "\n")
+cat("Total OTUs with guild assignment:", nrow(otu_with_guild), "\n")
+cat("Total OTUs with phylum assignment:", nrow(otu_with_phylum), "\n")
+cat("Guilds found:", paste(unique(abundance_summary$Guild), collapse = ", "), "\n")
+cat("Phyla found:", paste(unique(phylum_abundance_summary$Phylum), collapse = ", "), "\n")
+cat("\nOTUs in 'Other' guild:", sum(otu_with_guild$Guild == "Other"), "\n")
+cat("OTUs in other guilds:", sum(otu_with_guild$Guild != "Other"), "\n")
+cat("\nPlots saved as:\n")
+cat("  GUILD ANALYSIS:\n")
+cat("  - OTU_Guild_Abundance_StackedBar.png\n")
+cat("  - OTU_Guild_Richness_StackedBar.png\n")
+cat("  - OTU_Guild_Occurrence_StackedBar.png\n")
+cat("  - OTU_Guild_Occurrence_Absolute_StackedBar.png\n")
+cat("  - OTU_Guild_Total_Abundance_StackedBar.png\n")
+cat("  PHYLUM ANALYSIS:\n")
+cat("  - OTU_Phylum_Relative_Abundance_StackedBar.png\n")
+cat("  - OTU_Phylum_Total_Abundance_StackedBar.png\n")
+cat("  - OTU_Phylum_Relative_Occurrence_StackedBar.png\n")
+cat("  - OTU_Phylum_Absolute_Occurrence_StackedBar.png\n")
+cat("\nSummary tables saved as:\n")
+cat("  GUILD ANALYSIS:\n")
+cat("  - Guild_Abundance_Summary.csv\n")
+cat("  - Sum_of_Squares_Abundance_Summary.csv\n")
+cat("  - Guild_Specific_Variation_Abundance.csv\n")
+cat("  - Guild_Occurrence_Summary.csv\n")
+cat("  - Sum_of_Squares_Occurrence_Summary.csv\n")
+cat("  - Guild_Specific_Variation_Occurrence.csv\n")
+cat("  - Guild_Richness_Summary.csv\n")
+cat("  PHYLUM ANALYSIS:\n")
+cat("  - Phylum_Abundance_Summary.csv\n")
+cat("  - Phylum_Occurrence_Summary.csv\n")
+cat("  - Sum_of_Squares_Phylum_Abundance_Summary.csv\n")
+cat("  - Phylum_Specific_Variation_Abundance.csv\n")
+cat("  - Sum_of_Squares_Phylum_Occurrence_Summary.csv\n")
+cat("  - Phylum_Specific_Variation_Occurrence.csv\n")
+cat("  - Guild_Richness_Summary.csv\n")
+cat("  - Guild_Occurrence_Summary.csv\n")
+
+# ==============================================================================
+# END OF SCRIPT
+# ==============================================================================
+
